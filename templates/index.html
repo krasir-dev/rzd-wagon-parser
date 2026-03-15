@@ -224,6 +224,7 @@ https://cargolk.rzd.ru/documents/archive/memos/1723700553</pre>
 
     <script>
         let progressInterval;
+        let progressTimeout;
 
         function startParsing() {
             const urls = document.getElementById('urls').value;
@@ -233,12 +234,14 @@ https://cargolk.rzd.ru/documents/archive/memos/1723700553</pre>
                 return;
             }
 
-            // Показываем прогресс
             document.getElementById('progressContainer').style.display = 'block';
             document.getElementById('resultContainer').style.display = 'none';
             document.getElementById('startBtn').disabled = true;
 
-            // Отправляем запрос на сервер
+            // Очищаем предыдущие интервалы
+            if (progressInterval) clearInterval(progressInterval);
+            if (progressTimeout) clearTimeout(progressTimeout);
+
             fetch('/start_parsing', {
                 method: 'POST',
                 headers: {
@@ -246,41 +249,84 @@ https://cargolk.rzd.ru/documents/archive/memos/1723700553</pre>
                 },
                 body: 'urls=' + encodeURIComponent(urls)
             })
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    return response.text().then(text => {
+                        throw new Error(`HTTP error ${response.status}: ${text.substring(0, 100)}`);
+                    });
+                }
+                return response.json();
+            })
             .then(data => {
                 if (data.error) {
                     showResult('error', 'Ошибка: ' + data.error);
                     document.getElementById('startBtn').disabled = false;
                 } else {
-                    // Начинаем отслеживать прогресс
+                    console.log("Парсинг запущен, начинаем отслеживание");
                     startProgressTracking();
                 }
             })
             .catch(error => {
-                showResult('error', 'Ошибка соединения: ' + error);
+                console.error('Ошибка:', error);
+                showResult('error', 'Ошибка соединения: ' + error.message);
                 document.getElementById('startBtn').disabled = false;
             });
         }
 
         function startProgressTracking() {
+            let attempts = 0;
+            const maxAttempts = 600; // 10 минут максимум
+
+            if (progressInterval) clearInterval(progressInterval);
+
             progressInterval = setInterval(() => {
-                fetch('/progress')
-                    .then(response => response.json())
-                    .then(data => {
-                        updateProgress(data);
+                attempts++;
 
-                        if (data.status === 'completed' || data.status === 'error') {
-                            clearInterval(progressInterval);
-                            document.getElementById('startBtn').disabled = false;
+                fetch('/progress', {
+                    method: 'GET',
+                    headers: {
+                        'Accept': 'application/json',
+                        'Cache-Control': 'no-cache'
+                    }
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    console.log("Прогресс:", data);
+                    updateProgress(data);
 
-                            if (data.status === 'completed') {
-                                showResult('success', data.message, data.result_file);
-                            } else {
-                                showResult('error', data.message);
-                            }
-                        }
-                    });
-            }, 1000);
+                    if (data.status === 'completed') {
+                        console.log("Завершено! Файл:", data.result_file);
+                        clearInterval(progressInterval);
+                        document.getElementById('startBtn').disabled = false;
+
+                        // Даем серверу время на финализацию
+                        setTimeout(() => {
+                            showResult('success', data.message, data.result_file);
+                        }, 500);
+                    }
+                    else if (data.status === 'error') {
+                        clearInterval(progressInterval);
+                        document.getElementById('startBtn').disabled = false;
+                        showResult('error', data.message);
+                    }
+                    else if (attempts >= maxAttempts) {
+                        clearInterval(progressInterval);
+                        document.getElementById('startBtn').disabled = false;
+                        showResult('error', 'Превышено время ожидания');
+                    }
+                })
+                .catch(error => {
+                    console.error('Ошибка при получении прогресса:', error);
+                    // Не останавливаем интервал при временных ошибках
+                    document.getElementById('currentAction').textContent =
+                        'Ошибка соединения, повторная попытка...';
+                });
+            }, 2000); // Опрашиваем каждые 2 секунды вместо 1
         }
 
         function updateProgress(data) {
@@ -290,7 +336,7 @@ https://cargolk.rzd.ru/documents/archive/memos/1723700553</pre>
             document.getElementById('progressText').textContent =
                 `Прогресс: ${data.current}/${data.total}`;
             document.getElementById('status').textContent = data.status;
-            document.getElementById('currentAction').textContent = data.message;
+            document.getElementById('currentAction').textContent = data.message || '';
         }
 
         function showResult(type, message, filename) {
@@ -304,8 +350,10 @@ https://cargolk.rzd.ru/documents/archive/memos/1723700553</pre>
 
             if (filename) {
                 downloadDiv.innerHTML = `<a href="/download/${filename}" class="download-link">📥 Скачать результаты (ZIP)</a>`;
+                console.log("Ссылка для скачивания создана:", filename);
             } else {
                 downloadDiv.innerHTML = '';
+                console.warn("Имя файла не получено!");
             }
         }
     </script>

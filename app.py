@@ -604,6 +604,7 @@ def start_parsing():
                 'success': True,
                 'message': f'Обработано {len(all_results)} документов',
                 'file': os.path.basename(zip_path)
+                'force_download': True  # Флаг для клиента
             })
 
         except Exception as e:
