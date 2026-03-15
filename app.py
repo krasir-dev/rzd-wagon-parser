@@ -12,13 +12,10 @@ import re
 import zipfile
 import uuid
 import threading
-import queue
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify, send_file
 from dotenv import load_dotenv
 import subprocess
-import shutil
-import stat
 import sys
 import traceback
 
@@ -62,8 +59,7 @@ app.config['JSON_SORT_KEYS'] = False
 # ============================================
 # ХРАНИЛИЩЕ ДЛЯ АСИНХРОННЫХ ЗАДАЧ
 # ============================================
-task_results = {}
-task_progress = {}
+task_status = {}  # Единое хранилище для всех задач
 
 # ============================================
 # ЛОГИРОВАНИЕ
@@ -305,8 +301,8 @@ def parse_all_wagons(driver, document_number, task_id=None):
     log_message(f"\n📋 Найдено вагонов: {len(wagon_buttons)}", "INFO")
 
     for i, button in enumerate(wagon_buttons, 1):
-        if task_id and task_id in task_progress:
-            task_progress[task_id] = f'Обработка вагона {i} из {len(wagon_buttons)}'
+        if task_id and task_id in task_status:
+            task_status[task_id]['message'] = f'Обработка вагона {i} из {len(wagon_buttons)}'
 
         try:
             wagon_number = button.find_element(By.CSS_SELECTOR,
@@ -472,19 +468,25 @@ def process_task(task_id, urls, session_dir):
     all_results = []
 
     try:
-        task_progress[task_id] = "Запуск браузера..."
+        task_status[task_id] = {
+            'status': 'processing',
+            'message': 'Запуск браузера...',
+            'created_at': datetime.now().isoformat()
+        }
+
         driver = setup_driver(session_dir)
 
-        task_progress[task_id] = "Авторизация..."
+        task_status[task_id]['message'] = 'Авторизация...'
         if not login(driver, USERNAME, PASSWORD):
-            task_results[task_id] = {
+            task_status[task_id] = {
                 'status': 'error',
-                'message': 'Ошибка авторизации'
+                'message': 'Ошибка авторизации',
+                'created_at': datetime.now().isoformat()
             }
             return
 
         for i, url in enumerate(urls, 1):
-            task_progress[task_id] = f'Обработка документа {i} из {len(urls)}'
+            task_status[task_id]['message'] = f'Обработка документа {i} из {len(urls)}'
             try:
                 result = process_document(driver, url, session_dir, task_id)
                 all_results.append(result)
@@ -493,19 +495,21 @@ def process_task(task_id, urls, session_dir):
                 continue
 
         if not all_results:
-            task_results[task_id] = {
+            task_status[task_id] = {
                 'status': 'error',
-                'message': 'Не удалось обработать ни одного документа'
+                'message': 'Не удалось обработать ни одного документа',
+                'created_at': datetime.now().isoformat()
             }
             return
 
-        task_progress[task_id] = "Создание ZIP архива..."
+        task_status[task_id]['message'] = "Создание ZIP архива..."
         zip_path = create_zip_with_results(session_dir, all_results)
 
-        task_results[task_id] = {
+        task_status[task_id] = {
             'status': 'completed',
             'message': f'Готово! Обработано {len(all_results)} документов',
-            'file': os.path.basename(zip_path)
+            'file': os.path.basename(zip_path),
+            'created_at': datetime.now().isoformat()
         }
 
         log_message(f"\n✅ Задача {task_id} успешно завершена", "INFO")
@@ -513,13 +517,12 @@ def process_task(task_id, urls, session_dir):
     except Exception as e:
         log_message(f"\n❌ Ошибка в задаче {task_id}: {e}", "ERROR")
         traceback.print_exc()
-        task_results[task_id] = {
+        task_status[task_id] = {
             'status': 'error',
-            'message': str(e)
+            'message': str(e),
+            'created_at': datetime.now().isoformat()
         }
     finally:
-        if task_id in task_progress:
-            del task_progress[task_id]
         close_driver(driver)
 
 # ============================================
@@ -550,8 +553,9 @@ def debug():
             'chromedriver': CHROMEDRIVER_PATH,
         },
         'tasks': {
-            'active': list(task_progress.keys()),
-            'completed': list(task_results.keys())
+            'active': [k for k, v in task_status.items() if v['status'] == 'processing'],
+            'completed': [k for k, v in task_status.items() if v['status'] == 'completed'],
+            'total': len(task_status)
         }
     }
     return jsonify(info)
@@ -593,15 +597,10 @@ def async_start_parsing():
         return jsonify({'error': str(e)}), 500
 
 @app.route('/task_status/<task_id>')
-def task_status(task_id):
+def task_status_endpoint(task_id):
     """Проверка статуса задачи."""
-    if task_id in task_results:
-        return jsonify(task_results[task_id])
-    elif task_id in task_progress:
-        return jsonify({
-            'status': 'processing',
-            'message': task_progress[task_id]
-        })
+    if task_id in task_status:
+        return jsonify(task_status[task_id])
     else:
         return jsonify({
             'status': 'not_found',
@@ -636,6 +635,29 @@ def handle_exception(e):
     log_message(f"❌ Необработанное исключение: {e}", "ERROR")
     traceback.print_exc()
     return jsonify({'error': 'Внутренняя ошибка сервера', 'details': str(e)}), 500
+
+# ============================================
+# ПЕРИОДИЧЕСКАЯ ОЧИСТКА СТАРЫХ ЗАДАЧ
+# ============================================
+def cleanup_old_tasks():
+    """Очистка задач старше 24 часов."""
+    while True:
+        time.sleep(3600)  # Проверка каждый час
+        current_time = datetime.now()
+        to_delete = []
+
+        for task_id, task_data in task_status.items():
+            created_at = datetime.fromisoformat(task_data.get('created_at', '2000-01-01T00:00:00'))
+            if (current_time - created_at) > timedelta(hours=24):
+                to_delete.append(task_id)
+
+        for task_id in to_delete:
+            del task_status[task_id]
+            log_message(f"🧹 Удалена старая задача: {task_id}", "INFO")
+
+# Запуск очистки в фоне
+cleanup_thread = threading.Thread(target=cleanup_old_tasks, daemon=True)
+cleanup_thread.start()
 
 # ============================================
 # ЗАПУСК ПРИЛОЖЕНИЯ
