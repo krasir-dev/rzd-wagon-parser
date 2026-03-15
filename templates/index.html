@@ -127,12 +127,17 @@
         .status {
             color: #667eea;
             font-weight: 600;
+            text-transform: capitalize;
         }
 
         .current-action {
             color: #666;
             font-size: 14px;
             margin-top: 10px;
+            padding: 10px;
+            background: #fff;
+            border-radius: 5px;
+            border-left: 3px solid #667eea;
         }
 
         .result {
@@ -193,18 +198,50 @@
             color: #999;
             margin-top: 10px;
             font-family: monospace;
-        }
-
-        .debug-info {
-            font-size: 12px;
-            color: #999;
-            margin-top: 5px;
             cursor: pointer;
-            text-decoration: underline;
+            padding: 5px;
+            background: #f0f0f0;
+            border-radius: 3px;
+            display: inline-block;
         }
 
-        .debug-info:hover {
-            color: #667eea;
+        .task-id:hover {
+            background: #e0e0e0;
+            color: #333;
+        }
+
+        .debug-panel {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f0f0f0;
+            border-radius: 8px;
+            font-size: 12px;
+            display: none;
+        }
+
+        .debug-panel pre {
+            margin-top: 10px;
+            padding: 10px;
+            background: #fff;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            overflow-x: auto;
+            max-height: 300px;
+        }
+
+        .debug-btn {
+            background: #6c757d;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 12px;
+            margin-right: 5px;
+        }
+
+        .debug-btn:hover {
+            background: #5a6268;
         }
     </style>
 </head>
@@ -223,6 +260,11 @@
 
             <button id="startBtn" onclick="startParsing()">Начать сбор данных</button>
 
+            <div style="margin-top: 10px; text-align: right;">
+                <button class="debug-btn" onclick="showDebug()">🔍 Отладка</button>
+                <button class="debug-btn" onclick="checkTaskStatus()">📋 Проверить статус</button>
+            </div>
+
             <div class="example">
                 <strong>📌 Пример формата:</strong>
                 <pre>https://cargolk.rzd.ru/documents/archive/memos/1723700552
@@ -240,13 +282,17 @@
                     <div id="progressFill" class="progress-fill" style="width: 0%"></div>
                 </div>
                 <div id="currentAction" class="current-action"></div>
-                <div id="taskId" class="task-id"></div>
-                <div class="debug-info" onclick="checkTaskStatus()">🔍 Проверить статус задачи</div>
+                <div id="taskId" class="task-id" onclick="copyTaskId()"></div>
             </div>
 
             <div id="resultContainer" class="result">
                 <div id="resultMessage"></div>
                 <div id="downloadLink"></div>
+            </div>
+
+            <div id="debugPanel" class="debug-panel">
+                <strong>Отладочная информация:</strong>
+                <div id="debugContent">Загрузка...</div>
             </div>
         </div>
     </div>
@@ -255,7 +301,7 @@
         let statusInterval;
         let currentTaskId = null;
         let retryCount = 0;
-        const MAX_RETRIES = 60; // Максимальное количество попыток (2 минуты при интервале 2 сек)
+        const MAX_RETRIES = 30;
 
         function startParsing() {
             const urls = document.getElementById('urls').value;
@@ -265,21 +311,17 @@
                 return;
             }
 
-            // Показываем прогресс
             document.getElementById('progressContainer').style.display = 'block';
             document.getElementById('resultContainer').style.display = 'none';
+            document.getElementById('debugPanel').style.display = 'none';
             document.getElementById('startBtn').disabled = true;
 
-            // Очищаем предыдущий интервал
             if (statusInterval) {
                 clearInterval(statusInterval);
             }
 
             retryCount = 0;
 
-            console.log("📤 Отправка запроса на парсинг...");
-
-            // Отправляем запрос на сервер
             fetch('/async_start_parsing', {
                 method: 'POST',
                 headers: {
@@ -288,7 +330,6 @@
                 body: 'urls=' + encodeURIComponent(urls)
             })
             .then(response => {
-                console.log("📥 Ответ получен, статус:", response.status);
                 if (!response.ok) {
                     return response.text().then(text => {
                         throw new Error(`HTTP error ${response.status}: ${text.substring(0, 100)}`);
@@ -297,30 +338,23 @@
                 return response.json();
             })
             .then(data => {
-                console.log("📦 Данные ответа:", data);
                 if (data.error) {
                     showResult('error', 'Ошибка: ' + data.error);
                     document.getElementById('startBtn').disabled = false;
                 } else {
                     currentTaskId = data.task_id;
-                    document.getElementById('taskId').textContent = `🆔 ID задачи: ${currentTaskId}`;
-                    console.log("✅ Задача создана, ID:", currentTaskId);
+                    document.getElementById('taskId').textContent = `🆔 ID: ${currentTaskId}`;
                     startStatusTracking(currentTaskId);
                 }
             })
             .catch(error => {
-                console.error('❌ Ошибка при отправке запроса:', error);
                 showResult('error', 'Ошибка соединения: ' + error.message);
                 document.getElementById('startBtn').disabled = false;
             });
         }
 
         function startStatusTracking(taskId) {
-            console.log("🔄 Начинаем отслеживание задачи:", taskId);
-
             statusInterval = setInterval(() => {
-                console.log(`🔄 Проверка статуса задачи ${taskId}, попытка ${retryCount + 1}/${MAX_RETRIES}`);
-
                 fetch(`/task_status/${taskId}`, {
                     method: 'GET',
                     headers: {
@@ -328,75 +362,52 @@
                         'Pragma': 'no-cache'
                     }
                 })
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error(`HTTP ${response.status}`);
-                    }
-                    return response.json();
-                })
+                .then(response => response.json())
                 .then(data => {
-                    console.log("📊 Получен статус:", data);
-
                     if (data.status === 'completed') {
-                        console.log("✅ Задача завершена успешно!");
                         clearInterval(statusInterval);
                         document.getElementById('startBtn').disabled = false;
                         document.getElementById('taskId').textContent = '';
                         showResult('success', data.message, data.file);
                     }
                     else if (data.status === 'error') {
-                        console.error("❌ Задача завершилась с ошибкой:", data.message);
                         clearInterval(statusInterval);
                         document.getElementById('startBtn').disabled = false;
                         document.getElementById('taskId').textContent = '';
                         showResult('error', data.message);
                     }
                     else if (data.status === 'processing') {
-                        console.log("⏳ Задача в обработке:", data.message);
                         updateProgress(data);
-                        retryCount = 0; // Сброс счетчика при успешном получении статуса
+                        retryCount = 0;
                     }
                     else if (data.status === 'not_found') {
                         retryCount++;
-                        console.warn(`⚠️ Задача не найдена, попытка ${retryCount}/${MAX_RETRIES}`);
-
                         if (retryCount >= MAX_RETRIES) {
-                            console.error("❌ Превышено количество попыток");
                             clearInterval(statusInterval);
                             document.getElementById('startBtn').disabled = false;
                             document.getElementById('taskId').textContent = '';
-
-                            let availableTasks = data.available_tasks ? data.available_tasks.join(', ') : 'нет';
-                            showResult('error', `Задача не найдена после ${MAX_RETRIES} попыток. Доступные задачи: ${availableTasks}`);
-                        } else {
-                            document.getElementById('currentAction').textContent =
-                                `Поиск задачи... (попытка ${retryCount}/${MAX_RETRIES})`;
+                            showResult('error', 'Задача не найдена после ' + MAX_RETRIES + ' попыток');
                         }
                     }
                 })
                 .catch(error => {
-                    console.error('❌ Ошибка при получении статуса:', error);
-                    document.getElementById('currentAction').textContent =
-                        'Ошибка соединения, повторная попытка...';
+                    console.error('Ошибка:', error);
                 });
-            }, 2000);
+            }, 3000);
         }
 
         function updateProgress(data) {
-            if (data.status === 'processing') {
-                document.getElementById('status').textContent = 'processing';
-                document.getElementById('currentAction').textContent = data.message || 'Обработка...';
+            document.getElementById('status').textContent = data.status;
+            document.getElementById('currentAction').textContent = data.message || 'Обработка...';
 
-                // Пытаемся извлечь прогресс из сообщения
-                const match = data.message?.match(/(\d+)\s+из\s+(\d+)/);
-                if (match) {
-                    const current = parseInt(match[1]);
-                    const total = parseInt(match[2]);
-                    const percent = (current / total * 100);
-                    document.getElementById('progressFill').style.width = percent + '%';
-                    document.getElementById('progressText').textContent =
-                        `Прогресс: ${current}/${total}`;
-                }
+            const match = data.message?.match(/(\d+)\s+из\s+(\d+)/);
+            if (match) {
+                const current = parseInt(match[1]);
+                const total = parseInt(match[2]);
+                const percent = (current / total * 100);
+                document.getElementById('progressFill').style.width = percent + '%';
+                document.getElementById('progressText').textContent =
+                    `Прогресс: ${current}/${total}`;
             }
         }
 
@@ -411,32 +422,50 @@
 
             if (filename) {
                 downloadDiv.innerHTML = `<a href="/download/${filename}" class="download-link">📥 Скачать результаты (ZIP)</a>`;
-                console.log("🔗 Ссылка для скачивания:", filename);
             } else {
                 downloadDiv.innerHTML = '';
             }
 
-            // Скрываем прогресс
             document.getElementById('progressContainer').style.display = 'none';
         }
 
+        function copyTaskId() {
+            if (currentTaskId) {
+                navigator.clipboard.writeText(currentTaskId).then(() => {
+                    alert('ID задачи скопирован: ' + currentTaskId);
+                });
+            }
+        }
+
+        function showDebug() {
+            const panel = document.getElementById('debugPanel');
+            const content = document.getElementById('debugContent');
+
+            if (panel.style.display === 'none' || panel.style.display === '') {
+                panel.style.display = 'block';
+                fetch('/debug')
+                    .then(response => response.json())
+                    .then(data => {
+                        content.innerHTML = '<pre>' + JSON.stringify(data, null, 2) + '</pre>';
+                    })
+                    .catch(error => {
+                        content.innerHTML = 'Ошибка загрузки: ' + error;
+                    });
+            } else {
+                panel.style.display = 'none';
+            }
+        }
+
         function checkTaskStatus() {
-            if (!currentTaskId) {
+            if (currentTaskId) {
+                window.open(`/task_status/${currentTaskId}`, '_blank');
+            } else {
                 const manualId = prompt("Введите ID задачи для проверки:");
                 if (manualId) {
                     window.open(`/task_status/${manualId}`, '_blank');
                 }
-            } else {
-                window.open(`/task_status/${currentTaskId}`, '_blank');
             }
         }
-
-        // Добавляем обработку видимости страницы
-        document.addEventListener('visibilitychange', function() {
-            if (!document.hidden && currentTaskId) {
-                console.log("🔄 Страница снова активна, продолжаем отслеживание");
-            }
-        });
     </script>
 </body>
 </html>

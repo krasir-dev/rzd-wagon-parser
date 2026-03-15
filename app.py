@@ -12,6 +12,7 @@ import re
 import zipfile
 import uuid
 import threading
+from threading import Lock
 from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify, send_file, make_response
 from dotenv import load_dotenv
@@ -73,7 +74,8 @@ app.config['JSON_SORT_KEYS'] = False
 # ============================================
 # ХРАНИЛИЩЕ ДЛЯ АСИНХРОННЫХ ЗАДАЧ
 # ============================================
-task_status = {}  # Единое хранилище для всех задач
+task_status = {}
+task_status_lock = Lock()
 
 # ============================================
 # ЛОГИРОВАНИЕ
@@ -89,10 +91,6 @@ def log_message(msg, level="INFO"):
 # ============================================
 def setup_chromium():
     """Проверка наличия и настройка Chromium и chromedriver."""
-    log_message("="*60, "DEBUG")
-    log_message("🔧 ПРОВЕРКА CHROMIUM", "DEBUG")
-    log_message("="*60, "DEBUG")
-
     chromium_paths = [
         "/usr/bin/chromium",
         "/usr/bin/chromium-browser",
@@ -105,7 +103,7 @@ def setup_chromium():
     for path in chromium_paths:
         if os.path.exists(path):
             chromium_binary = path
-            log_message(f"✓ Браузер найден: {chromium_binary}", "DEBUG")
+            log_message(f"✓ Браузер найден: {chromium_binary}", "INFO")
             break
 
     driver_paths = [
@@ -120,7 +118,7 @@ def setup_chromium():
     for path in driver_paths:
         if os.path.exists(path):
             chromedriver_path = path
-            log_message(f"✓ ChromeDriver найден: {chromedriver_path}", "DEBUG")
+            log_message(f"✓ ChromeDriver найден: {chromedriver_path}", "INFO")
             os.chmod(chromedriver_path, 0o755)
             break
 
@@ -128,11 +126,10 @@ def setup_chromium():
         try:
             result = subprocess.run([chromedriver_path, "--version"],
                                   capture_output=True, text=True)
-            log_message(f"  Версия: {result.stdout.strip()}", "DEBUG")
+            log_message(f"  Версия: {result.stdout.strip()}", "INFO")
         except:
             pass
 
-    log_message("="*60, "DEBUG")
     return chromium_binary, chromedriver_path
 
 CHROMIUM_BINARY, CHROMEDRIVER_PATH = setup_chromium()
@@ -315,8 +312,10 @@ def parse_all_wagons(driver, document_number, task_id=None):
     log_message(f"\n📋 Найдено вагонов: {len(wagon_buttons)}", "INFO")
 
     for i, button in enumerate(wagon_buttons, 1):
-        if task_id and task_id in task_status:
-            task_status[task_id]['message'] = f'Обработка вагона {i} из {len(wagon_buttons)}'
+        if task_id:
+            with task_status_lock:
+                if task_id in task_status:
+                    task_status[task_id]['message'] = f'Обработка вагона {i} из {len(wagon_buttons)}'
 
         try:
             wagon_number = button.find_element(By.CSS_SELECTOR,
@@ -482,22 +481,34 @@ def process_task(task_id, urls, session_dir):
     all_results = []
 
     try:
-        # Статус уже создан в async_start_parsing, просто обновляем сообщение
-        task_status[task_id]['message'] = 'Запуск браузера...'
+        # Проверяем существование задачи
+        with task_status_lock:
+            if task_id not in task_status:
+                task_status[task_id] = {
+                    'status': 'processing',
+                    'message': 'Восстановлена после ошибки',
+                    'created_at': datetime.now().isoformat()
+                }
+            task_status[task_id]['message'] = 'Запуск браузера...'
 
         driver = setup_driver(session_dir)
 
-        task_status[task_id]['message'] = 'Авторизация...'
+        with task_status_lock:
+            task_status[task_id]['message'] = 'Авторизация...'
+
         if not login(driver, USERNAME, PASSWORD):
-            task_status[task_id] = {
-                'status': 'error',
-                'message': 'Ошибка авторизации',
-                'created_at': task_status[task_id]['created_at']
-            }
+            with task_status_lock:
+                task_status[task_id] = {
+                    'status': 'error',
+                    'message': 'Ошибка авторизации',
+                    'created_at': task_status[task_id]['created_at']
+                }
             return
 
         for i, url in enumerate(urls, 1):
-            task_status[task_id]['message'] = f'Обработка документа {i} из {len(urls)}'
+            with task_status_lock:
+                task_status[task_id]['message'] = f'Обработка документа {i} из {len(urls)}'
+
             try:
                 result = process_document(driver, url, session_dir, task_id)
                 all_results.append(result)
@@ -506,39 +517,44 @@ def process_task(task_id, urls, session_dir):
                 continue
 
         if not all_results:
-            task_status[task_id] = {
-                'status': 'error',
-                'message': 'Не удалось обработать ни одного документа',
-                'created_at': task_status[task_id]['created_at']
-            }
+            with task_status_lock:
+                task_status[task_id] = {
+                    'status': 'error',
+                    'message': 'Не удалось обработать ни одного документа',
+                    'created_at': task_status[task_id]['created_at']
+                }
             return
 
-        task_status[task_id]['message'] = "Создание ZIP архива..."
+        with task_status_lock:
+            task_status[task_id]['message'] = "Создание ZIP архива..."
+
         zip_path = create_zip_with_results(session_dir, all_results)
 
-        task_status[task_id] = {
-            'status': 'completed',
-            'message': f'Готово! Обработано {len(all_results)} документов',
-            'file': os.path.basename(zip_path),
-            'created_at': task_status[task_id]['created_at']
-        }
+        with task_status_lock:
+            task_status[task_id] = {
+                'status': 'completed',
+                'message': f'Готово! Обработано {len(all_results)} документов',
+                'file': os.path.basename(zip_path),
+                'created_at': task_status[task_id]['created_at']
+            }
 
         log_message(f"\n✅ Задача {task_id} успешно завершена", "INFO")
 
     except Exception as e:
         log_message(f"\n❌ Ошибка в задаче {task_id}: {e}", "ERROR")
         traceback.print_exc()
-        if task_id in task_status:
-            task_status[task_id] = {
-                'status': 'error',
-                'message': str(e),
-                'created_at': task_status[task_id]['created_at']
-            }
+        with task_status_lock:
+            if task_id in task_status:
+                task_status[task_id] = {
+                    'status': 'error',
+                    'message': str(e),
+                    'created_at': task_status[task_id]['created_at']
+                }
     finally:
         close_driver(driver)
 
 # ============================================
-# ТЕСТОВЫЕ ЭНДПОИНТЫ
+# ЭНДПОИНТЫ
 # ============================================
 @app.route('/test')
 def test():
@@ -555,52 +571,44 @@ def test():
 @app.route('/debug')
 def debug():
     """Endpoint для отладки."""
-    info = {
-        'env': {
-            'USERNAME': USERNAME,
-            'DOWNLOAD_DIR': DOWNLOAD_DIR,
-        },
-        'paths': {
-            'chromium': CHROMIUM_BINARY,
-            'chromedriver': CHROMEDRIVER_PATH,
-        },
-        'tasks': {
-            'active': [k for k, v in task_status.items() if v.get('status') == 'processing'],
-            'completed': [k for k, v in task_status.items() if v.get('status') == 'completed'],
-            'total': len(task_status)
+    with task_status_lock:
+        active = []
+        completed = []
+
+        for task_id, data in task_status.items():
+            status = data.get('status')
+            if status == 'processing':
+                active.append(task_id)
+            elif status == 'completed':
+                completed.append(task_id)
+
+        info = {
+            'env': {
+                'USERNAME': USERNAME,
+                'DOWNLOAD_DIR': DOWNLOAD_DIR,
+            },
+            'paths': {
+                'chromium': CHROMIUM_BINARY,
+                'chromedriver': CHROMEDRIVER_PATH,
+            },
+            'tasks': {
+                'total': len(task_status),
+                'active': active,
+                'completed': completed,
+                'all': list(task_status.keys())
+            }
         }
-    }
-    return jsonify(info)
+        return jsonify(info)
 
 @app.route('/tasks')
-def list_tasks():
-    """Список всех активных задач."""
-    return jsonify({
-        'total': len(task_status),
-        'tasks': {
-            task_id: {
-                'status': data.get('status'),
-                'message': data.get('message', '')[:50] + '...' if len(data.get('message', '')) > 50 else data.get('message', ''),
-                'created_at': data.get('created_at')
-            }
-            for task_id, data in task_status.items()
-        }
-    })
+def tasks_list():
+    """Список всех задач."""
+    with task_status_lock:
+        return jsonify({
+            'total': len(task_status),
+            'tasks': task_status
+        })
 
-@app.route('/check_task/<task_id>')
-def check_task(task_id):
-    """Принудительная проверка задачи (для отладки)."""
-    result = {
-        'task_id': task_id,
-        'exists': task_id in task_status,
-        'task_data': task_status.get(task_id, None),
-        'all_tasks': list(task_status.keys())
-    }
-    return jsonify(result)
-
-# ============================================
-# ОСНОВНЫЕ ЭНДПОИНТЫ
-# ============================================
 @app.route('/')
 def index():
     """Главная страница."""
@@ -622,16 +630,19 @@ def async_start_parsing():
         session_dir = os.path.join(DOWNLOAD_DIR, f"task_{task_id}")
         os.makedirs(session_dir, exist_ok=True)
 
-        log_message(f"✅ Создана задача {task_id} с {len(urls)} URL", "INFO")
+        # Создаем задачу в хранилище
+        with task_status_lock:
+            task_status[task_id] = {
+                'status': 'processing',
+                'message': 'Запуск браузера...',
+                'created_at': datetime.now().isoformat(),
+                'urls': urls,
+                'progress': 0
+            }
+            log_message(f"✅ Создана задача {task_id} со статусом: {task_status[task_id]['status']}", "INFO")
+            log_message(f"📊 Всего задач: {len(task_status)}", "INFO")
 
-        # Сразу добавляем задачу в статус
-        task_status[task_id] = {
-            'status': 'processing',
-            'message': 'Запуск браузера...',
-            'created_at': datetime.now().isoformat()
-        }
-
-        # Запускаем в отдельном потоке
+        # Запускаем поток
         thread = threading.Thread(target=process_task, args=(task_id, urls, session_dir))
         thread.daemon = True
         thread.start()
@@ -642,24 +653,27 @@ def async_start_parsing():
         })
 
     except Exception as e:
-        log_message(f"❌ Ошибка при запуске задачи: {e}", "ERROR")
+        log_message(f"❌ Ошибка: {e}", "ERROR")
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/task_status/<task_id>')
 def task_status_endpoint(task_id):
     """Проверка статуса задачи."""
-    log_message(f"🔍 Запрос статуса для task_id: {task_id}", "INFO")
+    log_message(f"🔍 Запрос статуса для task_id: '{task_id}'", "INFO")
 
-    if task_id in task_status:
-        return jsonify(task_status[task_id])
-    else:
-        log_message(f"❌ Задача {task_id} не найдена. Доступные задачи: {list(task_status.keys())}", "WARNING")
-        return jsonify({
-            'status': 'not_found',
-            'message': 'Задача не найдена',
-            'available_tasks': list(task_status.keys())[-5:]  # Показываем последние 5 задач
-        })
+    with task_status_lock:
+        if task_id in task_status:
+            task_data = task_status[task_id]
+            log_message(f"✅ Задача найдена, статус: {task_data.get('status')}", "INFO")
+            return jsonify(task_data)
+        else:
+            log_message(f"❌ Задача '{task_id}' не найдена. Доступные задачи: {list(task_status.keys())}", "WARNING")
+            return jsonify({
+                'status': 'not_found',
+                'message': 'Задача не найдена',
+                'available_tasks': list(task_status.keys())[-10:]
+            })
 
 @app.route('/download/<filename>')
 def download_file(filename):
@@ -698,18 +712,19 @@ def handle_exception(e):
 def cleanup_old_tasks():
     """Очистка задач старше 24 часов."""
     while True:
-        time.sleep(3600)  # Проверка каждый час
+        time.sleep(3600)
         current_time = datetime.now()
         to_delete = []
 
-        for task_id, task_data in task_status.items():
-            created_at = datetime.fromisoformat(task_data.get('created_at', '2000-01-01T00:00:00'))
-            if (current_time - created_at) > timedelta(hours=24):
-                to_delete.append(task_id)
+        with task_status_lock:
+            for task_id, task_data in task_status.items():
+                created_at = datetime.fromisoformat(task_data.get('created_at', '2000-01-01T00:00:00'))
+                if (current_time - created_at) > timedelta(hours=24):
+                    to_delete.append(task_id)
 
-        for task_id in to_delete:
-            del task_status[task_id]
-            log_message(f"🧹 Удалена старая задача: {task_id}", "INFO")
+            for task_id in to_delete:
+                del task_status[task_id]
+                log_message(f"🧹 Удалена старая задача: {task_id}", "INFO")
 
 # Запуск очистки в фоне
 cleanup_thread = threading.Thread(target=cleanup_old_tasks, daemon=True)
