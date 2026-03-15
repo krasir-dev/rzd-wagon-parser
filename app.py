@@ -603,7 +603,7 @@ def start_parsing():
             return jsonify({
                 'success': True,
                 'message': f'Обработано {len(all_results)} документов',
-                'file': os.path.basename(zip_path)
+                'file': os.path.basename(zip_path),
                 'force_download': True  # Флаг для клиента
             })
 
