@@ -192,6 +192,19 @@
             font-size: 12px;
             color: #999;
             margin-top: 10px;
+            font-family: monospace;
+        }
+
+        .debug-info {
+            font-size: 12px;
+            color: #999;
+            margin-top: 5px;
+            cursor: pointer;
+            text-decoration: underline;
+        }
+
+        .debug-info:hover {
+            color: #667eea;
         }
     </style>
 </head>
@@ -228,6 +241,7 @@
                 </div>
                 <div id="currentAction" class="current-action"></div>
                 <div id="taskId" class="task-id"></div>
+                <div class="debug-info" onclick="checkTaskStatus()">🔍 Проверить статус задачи</div>
             </div>
 
             <div id="resultContainer" class="result">
@@ -240,6 +254,8 @@
     <script>
         let statusInterval;
         let currentTaskId = null;
+        let retryCount = 0;
+        const MAX_RETRIES = 60; // Максимальное количество попыток (2 минуты при интервале 2 сек)
 
         function startParsing() {
             const urls = document.getElementById('urls').value;
@@ -259,6 +275,10 @@
                 clearInterval(statusInterval);
             }
 
+            retryCount = 0;
+
+            console.log("📤 Отправка запроса на парсинг...");
+
             // Отправляем запрос на сервер
             fetch('/async_start_parsing', {
                 method: 'POST',
@@ -268,6 +288,7 @@
                 body: 'urls=' + encodeURIComponent(urls)
             })
             .then(response => {
+                console.log("📥 Ответ получен, статус:", response.status);
                 if (!response.ok) {
                     return response.text().then(text => {
                         throw new Error(`HTTP error ${response.status}: ${text.substring(0, 100)}`);
@@ -276,53 +297,88 @@
                 return response.json();
             })
             .then(data => {
+                console.log("📦 Данные ответа:", data);
                 if (data.error) {
                     showResult('error', 'Ошибка: ' + data.error);
                     document.getElementById('startBtn').disabled = false;
                 } else {
                     currentTaskId = data.task_id;
-                    document.getElementById('taskId').textContent = `ID задачи: ${currentTaskId}`;
+                    document.getElementById('taskId').textContent = `🆔 ID задачи: ${currentTaskId}`;
+                    console.log("✅ Задача создана, ID:", currentTaskId);
                     startStatusTracking(currentTaskId);
                 }
             })
             .catch(error => {
-                console.error('Ошибка:', error);
+                console.error('❌ Ошибка при отправке запроса:', error);
                 showResult('error', 'Ошибка соединения: ' + error.message);
                 document.getElementById('startBtn').disabled = false;
             });
         }
 
         function startStatusTracking(taskId) {
-            statusInterval = setInterval(() => {
-                fetch(`/task_status/${taskId}`)
-                    .then(response => response.json())
-                    .then(data => {
-                        updateProgress(data);
+            console.log("🔄 Начинаем отслеживание задачи:", taskId);
 
-                        if (data.status === 'completed') {
+            statusInterval = setInterval(() => {
+                console.log(`🔄 Проверка статуса задачи ${taskId}, попытка ${retryCount + 1}/${MAX_RETRIES}`);
+
+                fetch(`/task_status/${taskId}`, {
+                    method: 'GET',
+                    headers: {
+                        'Cache-Control': 'no-cache',
+                        'Pragma': 'no-cache'
+                    }
+                })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    console.log("📊 Получен статус:", data);
+
+                    if (data.status === 'completed') {
+                        console.log("✅ Задача завершена успешно!");
+                        clearInterval(statusInterval);
+                        document.getElementById('startBtn').disabled = false;
+                        document.getElementById('taskId').textContent = '';
+                        showResult('success', data.message, data.file);
+                    }
+                    else if (data.status === 'error') {
+                        console.error("❌ Задача завершилась с ошибкой:", data.message);
+                        clearInterval(statusInterval);
+                        document.getElementById('startBtn').disabled = false;
+                        document.getElementById('taskId').textContent = '';
+                        showResult('error', data.message);
+                    }
+                    else if (data.status === 'processing') {
+                        console.log("⏳ Задача в обработке:", data.message);
+                        updateProgress(data);
+                        retryCount = 0; // Сброс счетчика при успешном получении статуса
+                    }
+                    else if (data.status === 'not_found') {
+                        retryCount++;
+                        console.warn(`⚠️ Задача не найдена, попытка ${retryCount}/${MAX_RETRIES}`);
+
+                        if (retryCount >= MAX_RETRIES) {
+                            console.error("❌ Превышено количество попыток");
                             clearInterval(statusInterval);
                             document.getElementById('startBtn').disabled = false;
                             document.getElementById('taskId').textContent = '';
-                            showResult('success', data.message, data.file);
+
+                            let availableTasks = data.available_tasks ? data.available_tasks.join(', ') : 'нет';
+                            showResult('error', `Задача не найдена после ${MAX_RETRIES} попыток. Доступные задачи: ${availableTasks}`);
+                        } else {
+                            document.getElementById('currentAction').textContent =
+                                `Поиск задачи... (попытка ${retryCount}/${MAX_RETRIES})`;
                         }
-                        else if (data.status === 'error') {
-                            clearInterval(statusInterval);
-                            document.getElementById('startBtn').disabled = false;
-                            document.getElementById('taskId').textContent = '';
-                            showResult('error', data.message);
-                        }
-                        else if (data.status === 'not_found') {
-                            clearInterval(statusInterval);
-                            document.getElementById('startBtn').disabled = false;
-                            document.getElementById('taskId').textContent = '';
-                            showResult('error', 'Задача не найдена');
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Ошибка при получении статуса:', error);
-                        document.getElementById('currentAction').textContent =
-                            'Ошибка соединения, повторная попытка...';
-                    });
+                    }
+                })
+                .catch(error => {
+                    console.error('❌ Ошибка при получении статуса:', error);
+                    document.getElementById('currentAction').textContent =
+                        'Ошибка соединения, повторная попытка...';
+                });
             }, 2000);
         }
 
@@ -355,6 +411,7 @@
 
             if (filename) {
                 downloadDiv.innerHTML = `<a href="/download/${filename}" class="download-link">📥 Скачать результаты (ZIP)</a>`;
+                console.log("🔗 Ссылка для скачивания:", filename);
             } else {
                 downloadDiv.innerHTML = '';
             }
@@ -362,6 +419,24 @@
             // Скрываем прогресс
             document.getElementById('progressContainer').style.display = 'none';
         }
+
+        function checkTaskStatus() {
+            if (!currentTaskId) {
+                const manualId = prompt("Введите ID задачи для проверки:");
+                if (manualId) {
+                    window.open(`/task_status/${manualId}`, '_blank');
+                }
+            } else {
+                window.open(`/task_status/${currentTaskId}`, '_blank');
+            }
+        }
+
+        // Добавляем обработку видимости страницы
+        document.addEventListener('visibilitychange', function() {
+            if (!document.hidden && currentTaskId) {
+                console.log("🔄 Страница снова активна, продолжаем отслеживание");
+            }
+        });
     </script>
 </body>
 </html>

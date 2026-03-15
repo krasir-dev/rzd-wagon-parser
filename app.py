@@ -13,7 +13,7 @@ import zipfile
 import uuid
 import threading
 from datetime import datetime, timedelta
-from flask import Flask, render_template, request, jsonify, send_file
+from flask import Flask, render_template, request, jsonify, send_file, make_response
 from dotenv import load_dotenv
 import subprocess
 import sys
@@ -25,6 +25,20 @@ import traceback
 load_dotenv()
 
 app = Flask(__name__)
+
+# ============================================
+# НАСТРОЙКИ CORS
+# ============================================
+@app.after_request
+def add_cors_headers(response):
+    """Добавляем CORS заголовки ко всем ответам."""
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type, Accept')
+    response.headers.add('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+    response.headers.add('Cache-Control', 'no-cache, no-store, must-revalidate')
+    response.headers.add('Pragma', 'no-cache')
+    response.headers.add('Expires', '0')
+    return response
 
 # ============================================
 # НАСТРОЙКИ
@@ -468,11 +482,8 @@ def process_task(task_id, urls, session_dir):
     all_results = []
 
     try:
-        task_status[task_id] = {
-            'status': 'processing',
-            'message': 'Запуск браузера...',
-            'created_at': datetime.now().isoformat()
-        }
+        # Статус уже создан в async_start_parsing, просто обновляем сообщение
+        task_status[task_id]['message'] = 'Запуск браузера...'
 
         driver = setup_driver(session_dir)
 
@@ -481,7 +492,7 @@ def process_task(task_id, urls, session_dir):
             task_status[task_id] = {
                 'status': 'error',
                 'message': 'Ошибка авторизации',
-                'created_at': datetime.now().isoformat()
+                'created_at': task_status[task_id]['created_at']
             }
             return
 
@@ -498,7 +509,7 @@ def process_task(task_id, urls, session_dir):
             task_status[task_id] = {
                 'status': 'error',
                 'message': 'Не удалось обработать ни одного документа',
-                'created_at': datetime.now().isoformat()
+                'created_at': task_status[task_id]['created_at']
             }
             return
 
@@ -509,7 +520,7 @@ def process_task(task_id, urls, session_dir):
             'status': 'completed',
             'message': f'Готово! Обработано {len(all_results)} документов',
             'file': os.path.basename(zip_path),
-            'created_at': datetime.now().isoformat()
+            'created_at': task_status[task_id]['created_at']
         }
 
         log_message(f"\n✅ Задача {task_id} успешно завершена", "INFO")
@@ -517,11 +528,12 @@ def process_task(task_id, urls, session_dir):
     except Exception as e:
         log_message(f"\n❌ Ошибка в задаче {task_id}: {e}", "ERROR")
         traceback.print_exc()
-        task_status[task_id] = {
-            'status': 'error',
-            'message': str(e),
-            'created_at': datetime.now().isoformat()
-        }
+        if task_id in task_status:
+            task_status[task_id] = {
+                'status': 'error',
+                'message': str(e),
+                'created_at': task_status[task_id]['created_at']
+            }
     finally:
         close_driver(driver)
 
@@ -553,12 +565,38 @@ def debug():
             'chromedriver': CHROMEDRIVER_PATH,
         },
         'tasks': {
-            'active': [k for k, v in task_status.items() if v['status'] == 'processing'],
-            'completed': [k for k, v in task_status.items() if v['status'] == 'completed'],
+            'active': [k for k, v in task_status.items() if v.get('status') == 'processing'],
+            'completed': [k for k, v in task_status.items() if v.get('status') == 'completed'],
             'total': len(task_status)
         }
     }
     return jsonify(info)
+
+@app.route('/tasks')
+def list_tasks():
+    """Список всех активных задач."""
+    return jsonify({
+        'total': len(task_status),
+        'tasks': {
+            task_id: {
+                'status': data.get('status'),
+                'message': data.get('message', '')[:50] + '...' if len(data.get('message', '')) > 50 else data.get('message', ''),
+                'created_at': data.get('created_at')
+            }
+            for task_id, data in task_status.items()
+        }
+    })
+
+@app.route('/check_task/<task_id>')
+def check_task(task_id):
+    """Принудительная проверка задачи (для отладки)."""
+    result = {
+        'task_id': task_id,
+        'exists': task_id in task_status,
+        'task_data': task_status.get(task_id, None),
+        'all_tasks': list(task_status.keys())
+    }
+    return jsonify(result)
 
 # ============================================
 # ОСНОВНЫЕ ЭНДПОИНТЫ
@@ -573,6 +611,8 @@ def async_start_parsing():
     """Асинхронный запуск парсинга."""
     try:
         urls_text = request.form.get('urls', '')
+        log_message(f"📥 Получен запрос с urls: {urls_text[:100]}...", "INFO")
+
         urls = [url.strip() for url in urls_text.split('\n') if url.strip()]
 
         if not urls:
@@ -581,6 +621,15 @@ def async_start_parsing():
         task_id = str(uuid.uuid4())
         session_dir = os.path.join(DOWNLOAD_DIR, f"task_{task_id}")
         os.makedirs(session_dir, exist_ok=True)
+
+        log_message(f"✅ Создана задача {task_id} с {len(urls)} URL", "INFO")
+
+        # Сразу добавляем задачу в статус
+        task_status[task_id] = {
+            'status': 'processing',
+            'message': 'Запуск браузера...',
+            'created_at': datetime.now().isoformat()
+        }
 
         # Запускаем в отдельном потоке
         thread = threading.Thread(target=process_task, args=(task_id, urls, session_dir))
@@ -594,17 +643,22 @@ def async_start_parsing():
 
     except Exception as e:
         log_message(f"❌ Ошибка при запуске задачи: {e}", "ERROR")
+        traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
 @app.route('/task_status/<task_id>')
 def task_status_endpoint(task_id):
     """Проверка статуса задачи."""
+    log_message(f"🔍 Запрос статуса для task_id: {task_id}", "INFO")
+
     if task_id in task_status:
         return jsonify(task_status[task_id])
     else:
+        log_message(f"❌ Задача {task_id} не найдена. Доступные задачи: {list(task_status.keys())}", "WARNING")
         return jsonify({
             'status': 'not_found',
-            'message': 'Задача не найдена'
+            'message': 'Задача не найдена',
+            'available_tasks': list(task_status.keys())[-5:]  # Показываем последние 5 задач
         })
 
 @app.route('/download/<filename>')
@@ -614,7 +668,9 @@ def download_file(filename):
         if task_folder.startswith('task_'):
             file_path = os.path.join(DOWNLOAD_DIR, task_folder, filename)
             if os.path.exists(file_path):
-                return send_file(file_path, as_attachment=True)
+                response = make_response(send_file(file_path, as_attachment=True))
+                response.headers.add('Cache-Control', 'no-cache, no-store, must-revalidate')
+                return response
 
     return jsonify({'error': 'Файл не найден'}), 404
 
