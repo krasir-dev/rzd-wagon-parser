@@ -62,6 +62,7 @@
             font-size: 16px;
             resize: vertical;
             transition: border-color 0.3s;
+            font-family: inherit;
         }
 
         textarea:focus {
@@ -128,6 +129,12 @@
             font-weight: 600;
         }
 
+        .current-action {
+            color: #666;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+
         .result {
             margin-top: 20px;
             padding: 20px;
@@ -180,6 +187,12 @@
             border-radius: 5px;
             overflow-x: auto;
         }
+
+        .task-id {
+            font-size: 12px;
+            color: #999;
+            margin-top: 10px;
+        }
     </style>
 </head>
 <body>
@@ -191,8 +204,8 @@
 
         <div class="content">
             <div class="form-group">
-                <label for="urls">Введите URL документов (по одному на строку):</label>
-                <textarea id="urls" rows="5" placeholder="https://cargolk.rzd.ru/documents/archive/memos/1723700552&#10;https://cargolk.rzd.ru/documents/archive/memos/1723700553&#10;https://cargolk.rzd.ru/documents/archive/memos/1723700554"></textarea>
+                <label for="urls">Введите URL или ID документов (по одному на строку):</label>
+                <textarea id="urls" rows="5" placeholder="https://cargolk.rzd.ru/documents/archive/memos/1723700552&#10;1725395220&#10;https://cargolk.rzd.ru/documents/archive/memos/1725520828"></textarea>
             </div>
 
             <button id="startBtn" onclick="startParsing()">Начать сбор данных</button>
@@ -200,19 +213,21 @@
             <div class="example">
                 <strong>📌 Пример формата:</strong>
                 <pre>https://cargolk.rzd.ru/documents/archive/memos/1723700552
-https://cargolk.rzd.ru/documents/archive/memos/1723700553</pre>
-                <p>Можно использовать как полные ссылки, так и только ID документов (например, 1723700552)</p>
+1725395220
+1725520828</pre>
+                <p>Можно использовать как полные ссылки, так и только ID документов</p>
             </div>
 
             <div id="progressContainer" class="progress-container">
                 <div class="progress-info">
                     <span id="progressText">Прогресс: 0/0</span>
-                    <span id="status" class="status">Ожидание...</span>
+                    <span id="status" class="status">idle</span>
                 </div>
                 <div class="progress-bar">
                     <div id="progressFill" class="progress-fill" style="width: 0%"></div>
                 </div>
                 <div id="currentAction" class="current-action"></div>
+                <div id="taskId" class="task-id"></div>
             </div>
 
             <div id="resultContainer" class="result">
@@ -223,8 +238,8 @@ https://cargolk.rzd.ru/documents/archive/memos/1723700553</pre>
     </div>
 
     <script>
-        let progressInterval;
-        let progressTimeout;
+        let statusInterval;
+        let currentTaskId = null;
 
         function startParsing() {
             const urls = document.getElementById('urls').value;
@@ -234,15 +249,18 @@ https://cargolk.rzd.ru/documents/archive/memos/1723700553</pre>
                 return;
             }
 
+            // Показываем прогресс
             document.getElementById('progressContainer').style.display = 'block';
             document.getElementById('resultContainer').style.display = 'none';
             document.getElementById('startBtn').disabled = true;
 
-            // Очищаем предыдущие интервалы
-            if (progressInterval) clearInterval(progressInterval);
-            if (progressTimeout) clearTimeout(progressTimeout);
+            // Очищаем предыдущий интервал
+            if (statusInterval) {
+                clearInterval(statusInterval);
+            }
 
-            fetch('/start_parsing', {
+            // Отправляем запрос на сервер
+            fetch('/async_start_parsing', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/x-www-form-urlencoded',
@@ -262,8 +280,9 @@ https://cargolk.rzd.ru/documents/archive/memos/1723700553</pre>
                     showResult('error', 'Ошибка: ' + data.error);
                     document.getElementById('startBtn').disabled = false;
                 } else {
-                    console.log("Парсинг запущен, начинаем отслеживание");
-                    startProgressTracking();
+                    currentTaskId = data.task_id;
+                    document.getElementById('taskId').textContent = `ID задачи: ${currentTaskId}`;
+                    startStatusTracking(currentTaskId);
                 }
             })
             .catch(error => {
@@ -273,70 +292,56 @@ https://cargolk.rzd.ru/documents/archive/memos/1723700553</pre>
             });
         }
 
-        function startProgressTracking() {
-            let attempts = 0;
-            const maxAttempts = 600; // 10 минут максимум
+        function startStatusTracking(taskId) {
+            statusInterval = setInterval(() => {
+                fetch(`/task_status/${taskId}`)
+                    .then(response => response.json())
+                    .then(data => {
+                        updateProgress(data);
 
-            if (progressInterval) clearInterval(progressInterval);
-
-            progressInterval = setInterval(() => {
-                attempts++;
-
-                fetch('/progress', {
-                    method: 'GET',
-                    headers: {
-                        'Accept': 'application/json',
-                        'Cache-Control': 'no-cache'
-                    }
-                })
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error(`HTTP ${response.status}`);
-                    }
-                    return response.json();
-                })
-                .then(data => {
-                    console.log("Прогресс:", data);
-                    updateProgress(data);
-
-                    if (data.status === 'completed') {
-                        console.log("Завершено! Файл:", data.result_file);
-                        clearInterval(progressInterval);
-                        document.getElementById('startBtn').disabled = false;
-
-                        // Даем серверу время на финализацию
-                        setTimeout(() => {
-                            showResult('success', data.message, data.result_file);
-                        }, 500);
-                    }
-                    else if (data.status === 'error') {
-                        clearInterval(progressInterval);
-                        document.getElementById('startBtn').disabled = false;
-                        showResult('error', data.message);
-                    }
-                    else if (attempts >= maxAttempts) {
-                        clearInterval(progressInterval);
-                        document.getElementById('startBtn').disabled = false;
-                        showResult('error', 'Превышено время ожидания');
-                    }
-                })
-                .catch(error => {
-                    console.error('Ошибка при получении прогресса:', error);
-                    // Не останавливаем интервал при временных ошибках
-                    document.getElementById('currentAction').textContent =
-                        'Ошибка соединения, повторная попытка...';
-                });
-            }, 2000); // Опрашиваем каждые 2 секунды вместо 1
+                        if (data.status === 'completed') {
+                            clearInterval(statusInterval);
+                            document.getElementById('startBtn').disabled = false;
+                            document.getElementById('taskId').textContent = '';
+                            showResult('success', data.message, data.file);
+                        }
+                        else if (data.status === 'error') {
+                            clearInterval(statusInterval);
+                            document.getElementById('startBtn').disabled = false;
+                            document.getElementById('taskId').textContent = '';
+                            showResult('error', data.message);
+                        }
+                        else if (data.status === 'not_found') {
+                            clearInterval(statusInterval);
+                            document.getElementById('startBtn').disabled = false;
+                            document.getElementById('taskId').textContent = '';
+                            showResult('error', 'Задача не найдена');
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Ошибка при получении статуса:', error);
+                        document.getElementById('currentAction').textContent =
+                            'Ошибка соединения, повторная попытка...';
+                    });
+            }, 2000);
         }
 
         function updateProgress(data) {
-            const percent = data.total > 0 ? (data.current / data.total * 100) : 0;
+            if (data.status === 'processing') {
+                document.getElementById('status').textContent = 'processing';
+                document.getElementById('currentAction').textContent = data.message || 'Обработка...';
 
-            document.getElementById('progressFill').style.width = percent + '%';
-            document.getElementById('progressText').textContent =
-                `Прогресс: ${data.current}/${data.total}`;
-            document.getElementById('status').textContent = data.status;
-            document.getElementById('currentAction').textContent = data.message || '';
+                // Пытаемся извлечь прогресс из сообщения
+                const match = data.message?.match(/(\d+)\s+из\s+(\d+)/);
+                if (match) {
+                    const current = parseInt(match[1]);
+                    const total = parseInt(match[2]);
+                    const percent = (current / total * 100);
+                    document.getElementById('progressFill').style.width = percent + '%';
+                    document.getElementById('progressText').textContent =
+                        `Прогресс: ${current}/${total}`;
+                }
+            }
         }
 
         function showResult(type, message, filename) {
@@ -350,11 +355,12 @@ https://cargolk.rzd.ru/documents/archive/memos/1723700553</pre>
 
             if (filename) {
                 downloadDiv.innerHTML = `<a href="/download/${filename}" class="download-link">📥 Скачать результаты (ZIP)</a>`;
-                console.log("Ссылка для скачивания создана:", filename);
             } else {
                 downloadDiv.innerHTML = '';
-                console.warn("Имя файла не получено!");
             }
+
+            // Скрываем прогресс
+            document.getElementById('progressContainer').style.display = 'none';
         }
     </script>
 </body>

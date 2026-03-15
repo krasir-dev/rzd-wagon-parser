@@ -6,17 +6,19 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-# from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
 import os
 import re
 import zipfile
 import uuid
-from datetime import datetime
+import threading
+import queue
+from datetime import datetime, timedelta
 from flask import Flask, render_template, request, jsonify, send_file
 from dotenv import load_dotenv
 import subprocess
-# import shutil
-# import stat
+import shutil
+import stat
 import sys
 import traceback
 
@@ -50,15 +52,18 @@ os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
 
 # ============================================
-# ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
+# НАСТРОЙКИ FLASK
 # ============================================
-progress = {
-    'total': 0,
-    'current': 0,
-    'status': 'idle',
-    'message': ''
-}
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=1)
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = timedelta(hours=1)
+app.config['JSON_AS_ASCII'] = False
+app.config['JSON_SORT_KEYS'] = False
 
+# ============================================
+# ХРАНИЛИЩЕ ДЛЯ АСИНХРОННЫХ ЗАДАЧ
+# ============================================
+task_results = {}
+task_progress = {}
 
 # ============================================
 # ЛОГИРОВАНИЕ
@@ -68,7 +73,6 @@ def log_message(msg, level="INFO"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {level}: {msg}")
     sys.stdout.flush()
-
 
 # ============================================
 # ПРОВЕРКА И НАСТРОЙКА CHROMIUM
@@ -121,9 +125,7 @@ def setup_chromium():
     log_message("="*60, "DEBUG")
     return chromium_binary, chromedriver_path
 
-
 CHROMIUM_BINARY, CHROMEDRIVER_PATH = setup_chromium()
-
 
 # ============================================
 # ФУНКЦИИ ДЛЯ РАБОТЫ С ДРАЙВЕРОМ
@@ -183,7 +185,6 @@ def setup_driver(download_dir):
     log_message("✓ Браузер успешно запущен", "INFO")
     return driver
 
-
 def close_driver(driver):
     """Безопасное закрытие драйвера."""
     if driver:
@@ -192,7 +193,6 @@ def close_driver(driver):
             log_message("✓ Браузер закрыт", "INFO")
         except:
             pass
-
 
 # ============================================
 # ФУНКЦИИ АВТОРИЗАЦИИ
@@ -233,7 +233,6 @@ def login(driver, username, password):
         traceback.print_exc()
         return False
 
-
 # ============================================
 # ФУНКЦИИ ПАРСИНГА
 # ============================================
@@ -241,7 +240,6 @@ def extract_document_number(text):
     """Извлекает только цифры из номера документа."""
     numbers = re.findall(r'\d+', text)
     return numbers[0] if numbers else None
-
 
 def parse_wagon_dates(driver, wagon_data):
     """Парсинг дат для текущего вагона."""
@@ -272,7 +270,6 @@ def parse_wagon_dates(driver, wagon_data):
         wagon_data['Уборка'] = "Не найдено"
         wagon_data['Возврат на выставочный путь'] = "Не найдено"
 
-
 def find_document_number(driver):
     """Поиск номера документа."""
     try:
@@ -288,11 +285,9 @@ def find_document_number(driver):
         pass
     return "Не найдено"
 
-
-def parse_all_wagons(driver, document_number):
+def parse_all_wagons(driver, document_number, task_id=None):
     """Парсинг данных по всем вагонам."""
     wagons_data = []
-    global progress
 
     try:
         WebDriverWait(driver, 10).until(
@@ -307,12 +302,11 @@ def parse_all_wagons(driver, document_number):
         "div.list-custom.list-custom_roster button.list-custom__item")
     doc_id = driver.current_url.rstrip('/').split('/')[-1]
 
-    progress['total'] = len(wagon_buttons)
     log_message(f"\n📋 Найдено вагонов: {len(wagon_buttons)}", "INFO")
 
     for i, button in enumerate(wagon_buttons, 1):
-        progress['current'] = i
-        progress['message'] = f'Обработка вагона {i} из {len(wagon_buttons)}'
+        if task_id and task_id in task_progress:
+            task_progress[task_id] = f'Обработка вагона {i} из {len(wagon_buttons)}'
 
         try:
             wagon_number = button.find_element(By.CSS_SELECTOR,
@@ -338,7 +332,6 @@ def parse_all_wagons(driver, document_number):
             continue
 
     return wagons_data
-
 
 def download_pdf(driver, download_dir, doc_id):
     """Скачивание печатной формы."""
@@ -396,12 +389,8 @@ def download_pdf(driver, download_dir, doc_id):
         log_message(f"  ✗ Ошибка при скачивании PDF: {e}", "ERROR")
     return None
 
-
-def process_document(driver, url, session_dir):
+def process_document(driver, url, session_dir, task_id=None):
     """Обработка одного документа."""
-    global progress
-    progress['message'] = f'Переход к документу: {url}'
-
     if '/' in url:
         doc_id = url.rstrip('/').split('/')[-1]
     else:
@@ -414,7 +403,7 @@ def process_document(driver, url, session_dir):
     time.sleep(5)
 
     document_number = find_document_number(driver)
-    wagons_data = parse_all_wagons(driver, document_number)
+    wagons_data = parse_all_wagons(driver, document_number, task_id)
     pdf_filename = download_pdf(driver, session_dir, doc_id)
 
     return {
@@ -424,7 +413,6 @@ def process_document(driver, url, session_dir):
         'wagons': wagons_data,
         'pdf': pdf_filename
     }
-
 
 def create_zip_with_results(session_dir, all_results):
     """Создание ZIP архива с результатами."""
@@ -473,6 +461,66 @@ def create_zip_with_results(session_dir, all_results):
 
     return zip_path
 
+# ============================================
+# АСИНХРОННАЯ ОБРАБОТКА ЗАДАЧ
+# ============================================
+def process_task(task_id, urls, session_dir):
+    """Фоновая обработка задачи."""
+    log_message(f"\n🚀 Запуск фоновой задачи {task_id}", "INFO")
+
+    driver = None
+    all_results = []
+
+    try:
+        task_progress[task_id] = "Запуск браузера..."
+        driver = setup_driver(session_dir)
+
+        task_progress[task_id] = "Авторизация..."
+        if not login(driver, USERNAME, PASSWORD):
+            task_results[task_id] = {
+                'status': 'error',
+                'message': 'Ошибка авторизации'
+            }
+            return
+
+        for i, url in enumerate(urls, 1):
+            task_progress[task_id] = f'Обработка документа {i} из {len(urls)}'
+            try:
+                result = process_document(driver, url, session_dir, task_id)
+                all_results.append(result)
+            except Exception as e:
+                log_message(f"✗ Ошибка при обработке {url}: {e}", "ERROR")
+                continue
+
+        if not all_results:
+            task_results[task_id] = {
+                'status': 'error',
+                'message': 'Не удалось обработать ни одного документа'
+            }
+            return
+
+        task_progress[task_id] = "Создание ZIP архива..."
+        zip_path = create_zip_with_results(session_dir, all_results)
+
+        task_results[task_id] = {
+            'status': 'completed',
+            'message': f'Готово! Обработано {len(all_results)} документов',
+            'file': os.path.basename(zip_path)
+        }
+
+        log_message(f"\n✅ Задача {task_id} успешно завершена", "INFO")
+
+    except Exception as e:
+        log_message(f"\n❌ Ошибка в задаче {task_id}: {e}", "ERROR")
+        traceback.print_exc()
+        task_results[task_id] = {
+            'status': 'error',
+            'message': str(e)
+        }
+    finally:
+        if task_id in task_progress:
+            del task_progress[task_id]
+        close_driver(driver)
 
 # ============================================
 # ТЕСТОВЫЕ ЭНДПОИНТЫ
@@ -489,7 +537,6 @@ def test():
         'time': datetime.now().isoformat()
     })
 
-
 @app.route('/debug')
 def debug():
     """Endpoint для отладки."""
@@ -502,10 +549,75 @@ def debug():
             'chromium': CHROMIUM_BINARY,
             'chromedriver': CHROMEDRIVER_PATH,
         },
-        'progress': progress
+        'tasks': {
+            'active': list(task_progress.keys()),
+            'completed': list(task_results.keys())
+        }
     }
     return jsonify(info)
 
+# ============================================
+# ОСНОВНЫЕ ЭНДПОИНТЫ
+# ============================================
+@app.route('/')
+def index():
+    """Главная страница."""
+    return render_template('index.html')
+
+@app.route('/async_start_parsing', methods=['POST'])
+def async_start_parsing():
+    """Асинхронный запуск парсинга."""
+    try:
+        urls_text = request.form.get('urls', '')
+        urls = [url.strip() for url in urls_text.split('\n') if url.strip()]
+
+        if not urls:
+            return jsonify({'error': 'Введите хотя бы один URL'}), 400
+
+        task_id = str(uuid.uuid4())
+        session_dir = os.path.join(DOWNLOAD_DIR, f"task_{task_id}")
+        os.makedirs(session_dir, exist_ok=True)
+
+        # Запускаем в отдельном потоке
+        thread = threading.Thread(target=process_task, args=(task_id, urls, session_dir))
+        thread.daemon = True
+        thread.start()
+
+        return jsonify({
+            'task_id': task_id,
+            'message': 'Задача запущена'
+        })
+
+    except Exception as e:
+        log_message(f"❌ Ошибка при запуске задачи: {e}", "ERROR")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/task_status/<task_id>')
+def task_status(task_id):
+    """Проверка статуса задачи."""
+    if task_id in task_results:
+        return jsonify(task_results[task_id])
+    elif task_id in task_progress:
+        return jsonify({
+            'status': 'processing',
+            'message': task_progress[task_id]
+        })
+    else:
+        return jsonify({
+            'status': 'not_found',
+            'message': 'Задача не найдена'
+        })
+
+@app.route('/download/<filename>')
+def download_file(filename):
+    """Скачивание файла."""
+    for task_folder in os.listdir(DOWNLOAD_DIR):
+        if task_folder.startswith('task_'):
+            file_path = os.path.join(DOWNLOAD_DIR, task_folder, filename)
+            if os.path.exists(file_path):
+                return send_file(file_path, as_attachment=True)
+
+    return jsonify({'error': 'Файл не найден'}), 404
 
 # ============================================
 # ОБРАБОТЧИКИ ОШИБОК
@@ -515,136 +627,15 @@ def internal_error(error):
     log_message(f"500 error: {error}", "ERROR")
     return jsonify({'error': 'Внутренняя ошибка сервера', 'details': str(error)}), 500
 
-
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({'error': 'Ресурс не найден'}), 404
-
 
 @app.errorhandler(Exception)
 def handle_exception(e):
     log_message(f"❌ Необработанное исключение: {e}", "ERROR")
     traceback.print_exc()
     return jsonify({'error': 'Внутренняя ошибка сервера', 'details': str(e)}), 500
-
-
-# ============================================
-# ВЕБ-ИНТЕРФЕЙС
-# ============================================
-@app.route('/')
-def index():
-    """Главная страница."""
-    return render_template('index.html')
-
-
-@app.route('/start_parsing', methods=['POST'])
-def start_parsing():
-    """Запуск парсинга."""
-    global progress
-
-    log_message("\n" + "="*60, "INFO")
-    log_message("📥 ПОЛУЧЕН ЗАПРОС НА ПАРСИНГ", "INFO")
-    log_message("="*60, "INFO")
-
-    try:
-        urls_text = request.form.get('urls', '')
-        log_message(f"Получен текст: {urls_text[:100]}...", "DEBUG")
-
-        urls = [url.strip() for url in urls_text.split('\n') if url.strip()]
-
-        if not urls:
-            return jsonify({'error': 'Введите хотя бы один URL'}), 400
-
-        log_message(f"✓ Обрабатывается URL: {len(urls)}", "INFO")
-
-        session_id = str(uuid.uuid4())[:8]
-        session_dir = os.path.join(DOWNLOAD_DIR, f"session_{session_id}")
-        os.makedirs(session_dir, exist_ok=True)
-        log_message(f"✓ Создана сессия: {session_id}", "INFO")
-
-        progress = {
-            'total': len(urls),
-            'current': 0,
-            'status': 'running',
-            'message': 'Запуск парсинга...'
-        }
-
-        driver = None
-        all_results = []
-
-        try:
-            driver = setup_driver(session_dir)
-
-            if not login(driver, USERNAME, PASSWORD):
-                return jsonify({'error': 'Ошибка авторизации'}), 500
-
-            for i, url in enumerate(urls, 1):
-                log_message(f"\n📄 Обработка документа {i}/{len(urls)}", "INFO")
-                progress['current'] = i
-                progress['message'] = f'Обработка документа {i} из {len(urls)}'
-
-                try:
-                    result = process_document(driver, url, session_dir)
-                    all_results.append(result)
-                    log_message(f"  ✓ Документ обработан, найдено вагонов: {len(result['wagons'])}", "INFO")
-                except Exception as e:
-                    log_message(f"  ✗ Ошибка при обработке документа {url}: {e}", "ERROR")
-                    continue
-
-            if not all_results:
-                return jsonify({'error': 'Не удалось обработать ни одного документа'}), 500
-
-            zip_path = create_zip_with_results(session_dir, all_results)
-
-            progress['status'] = 'completed'
-            progress['message'] = f'Готово! Обработано {len(all_results)} документов'
-            progress['result_file'] = os.path.basename(zip_path)
-
-            return jsonify({
-                'success': True,
-                'message': f'Обработано {len(all_results)} документов',
-                'file': os.path.basename(zip_path),
-                'force_download': True  # Флаг для клиента
-            })
-
-        except Exception as e:
-            log_message(f"\n❌ Ошибка в процессе парсинга: {e}", "ERROR")
-            traceback.print_exc()
-            progress['status'] = 'error'
-            progress['message'] = f'Ошибка: {str(e)}'
-            return jsonify({'error': str(e)}), 500
-        finally:
-            close_driver(driver)
-
-    except Exception as e:
-        log_message(f"\n❌ Критическая ошибка: {e}", "ERROR")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
-
-
-@app.route('/progress')
-def get_progress():
-    #"""Получение прогресса."""
-    # return jsonify(progress)
-    """Получение прогресса."""
-    response = jsonify(progress)
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Cache-Control', 'no-cache, no-store, must-revalidate')
-    response.headers.add('Pragma', 'no-cache')
-    response.headers.add('Expires', '0')
-    return response
-
-@app.route('/download/<filename>')
-def download_file(filename):
-    """Скачивание файла."""
-    for session_folder in os.listdir(DOWNLOAD_DIR):
-        if session_folder.startswith('session_'):
-            file_path = os.path.join(DOWNLOAD_DIR, session_folder, filename)
-            if os.path.exists(file_path):
-                return send_file(file_path, as_attachment=True)
-
-    return jsonify({'error': 'Файл не найден'}), 404
-
 
 # ============================================
 # ЗАПУСК ПРИЛОЖЕНИЯ
@@ -657,4 +648,4 @@ if __name__ == '__main__':
     log_message(f"👤 Пользователь: {USERNAME}", "INFO")
     log_message("="*60 + "\n", "INFO")
 
-    app.run(debug=True, host='0.0.0.0', port=5028)
+    app.run(debug=True, host='0.0.0.0', port=5000)
