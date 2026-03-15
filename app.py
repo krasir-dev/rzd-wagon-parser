@@ -66,7 +66,7 @@ def log_message(msg, level="INFO"):
     """Функция для логирования с временной меткой."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {level}: {msg}")
-    sys.stdout.flush()  # Принудительный сброс буфера
+    sys.stdout.flush()
 
 # ============================================
 # ПРОВЕРКА И НАСТРОЙКА CHROMIUM
@@ -77,7 +77,6 @@ def setup_chromium():
     log_message("🔧 ПРОВЕРКА CHROMIUM", "DEBUG")
     log_message("="*60, "DEBUG")
 
-    # Поиск Chromium
     chromium_paths = [
         "/usr/bin/chromium",
         "/usr/bin/chromium-browser",
@@ -93,10 +92,6 @@ def setup_chromium():
             log_message(f"✓ Браузер найден: {chromium_binary}", "DEBUG")
             break
 
-    if not chromium_binary:
-        log_message("✗ Браузер не найден!", "WARNING")
-
-    # Поиск ChromeDriver
     driver_paths = [
         "/usr/bin/chromedriver",
         "/usr/local/bin/chromedriver",
@@ -110,25 +105,10 @@ def setup_chromium():
         if os.path.exists(path):
             chromedriver_path = path
             log_message(f"✓ ChromeDriver найден: {chromedriver_path}", "DEBUG")
-            # Делаем исполняемым
             os.chmod(chromedriver_path, 0o755)
             break
 
-    if not chromedriver_path:
-        # Пробуем найти через which
-        try:
-            result = subprocess.run(["which", "chromedriver"], capture_output=True, text=True)
-            if result.returncode == 0:
-                chromedriver_path = result.stdout.strip()
-                log_message(f"✓ ChromeDriver найден через which: {chromedriver_path}", "DEBUG")
-                os.chmod(chromedriver_path, 0o755)
-        except:
-            pass
-
-    if not chromedriver_path:
-        log_message("✗ ChromeDriver не найден!", "ERROR")
-    else:
-        # Проверяем версию
+    if chromedriver_path:
         try:
             result = subprocess.run([chromedriver_path, "--version"],
                                   capture_output=True, text=True)
@@ -139,8 +119,6 @@ def setup_chromium():
     log_message("="*60, "DEBUG")
     return chromium_binary, chromedriver_path
 
-# Запускаем проверку при старте
-log_message("🚀 ЗАПУСК ПРИЛОЖЕНИЯ", "INFO")
 CHROMIUM_BINARY, CHROMEDRIVER_PATH = setup_chromium()
 
 # ============================================
@@ -150,101 +128,56 @@ def setup_driver(download_dir):
     """Настройка драйвера с использованием Chromium."""
     log_message("\n🚀 Запуск браузера...", "INFO")
 
-    try:
-        chrome_options = Options()
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--remote-debugging-port=9222")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--disable-setuid-sandbox")
+    chrome_options.add_argument("--disable-extensions")
+    chrome_options.add_argument("--disable-logging")
+    chrome_options.add_argument("--log-level=3")
+    chrome_options.add_argument("--silent")
 
-        # Обязательные аргументы для headless-режима в контейнере
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--remote-debugging-port=9222")
-        chrome_options.add_argument("--disable-software-rasterizer")
-        chrome_options.add_argument("--disable-setuid-sandbox")
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-logging")
-        chrome_options.add_argument("--log-level=3")
-        chrome_options.add_argument("--silent")
+    if CHROMIUM_BINARY:
+        chrome_options.binary_location = CHROMIUM_BINARY
+        log_message(f"  Используется браузер: {CHROMIUM_BINARY}", "DEBUG")
 
-        # Явное указание пути к Chromium, если найден
-        if CHROMIUM_BINARY:
-            chrome_options.binary_location = CHROMIUM_BINARY
-            log_message(f"  Используется браузер: {CHROMIUM_BINARY}", "DEBUG")
-        else:
-            log_message("  Браузер не указан, используется стандартный", "WARNING")
+    prefs = {
+        "download.default_directory": download_dir,
+        "download.prompt_for_download": False,
+        "download.directory_upgrade": True,
+        "plugins.always_open_pdf_externally": True,
+        "safebrowsing.enabled": True,
+        "profile.default_content_setting_values.automatic_downloads": 1
+    }
+    chrome_options.add_experimental_option("prefs", prefs)
 
-        # Настройки для скачивания файлов
-        prefs = {
-            "download.default_directory": download_dir,
-            "download.prompt_for_download": False,
-            "download.directory_upgrade": True,
-            "plugins.always_open_pdf_externally": True,
-            "safebrowsing.enabled": True,
-            "profile.default_content_setting_values.automatic_downloads": 1
-        }
-        chrome_options.add_experimental_option("prefs", prefs)
+    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+    chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    chrome_options.add_experimental_option("useAutomationExtension", False)
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 
-        # Скрываем автоматизацию
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option("useAutomationExtension", False)
+    driver_path = CHROMEDRIVER_PATH
+    if not driver_path:
+        possible_paths = ["/usr/bin/chromedriver", "/usr/local/bin/chromedriver"]
+        for path in possible_paths:
+            if os.path.exists(path):
+                driver_path = path
+                break
 
-        # User-Agent
-        chrome_options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    if not driver_path:
+        raise Exception("ChromeDriver не найден!")
 
-        # Определяем путь к ChromeDriver
-        driver_path = CHROMEDRIVER_PATH
+    log_message(f"  Используется ChromeDriver: {driver_path}", "INFO")
 
-        if not driver_path:
-            # Если не нашли при старте, ищем сейчас
-            possible_paths = [
-                "/usr/bin/chromedriver",
-                "/usr/local/bin/chromedriver",
-                "/usr/bin/chromium-driver"
-            ]
-            for path in possible_paths:
-                if os.path.exists(path):
-                    driver_path = path
-                    log_message(f"  Найден ChromeDriver: {driver_path}", "DEBUG")
-                    break
-
-        if not driver_path:
-            error_msg = "❌ ChromeDriver не найден! Установите chromium-driver"
-            log_message(error_msg, "ERROR")
-            raise Exception(error_msg)
-
-        log_message(f"  Используется ChromeDriver: {driver_path}", "INFO")
-
-        # Создаем сервис и драйвер
-        service = Service(executable_path=driver_path)
-
-        try:
-            driver = webdriver.Chrome(service=service, options=chrome_options)
-            driver.maximize_window()
-            log_message("✓ Браузер успешно запущен", "INFO")
-            return driver
-        except Exception as e:
-            log_message(f"✗ Ошибка запуска браузера: {e}", "ERROR")
-            traceback.print_exc()
-
-            # Пробуем с дополнительными аргументами
-            log_message("  Пробуем с дополнительными аргументами...", "INFO")
-            chrome_options.add_argument("--disable-web-security")
-            chrome_options.add_argument("--allow-running-insecure-content")
-
-            try:
-                driver = webdriver.Chrome(service=service, options=chrome_options)
-                driver.maximize_window()
-                log_message("✓ Браузер успешно запущен (со второй попытки)", "INFO")
-                return driver
-            except Exception as e2:
-                log_message(f"✗ Ошибка при второй попытке: {e2}", "ERROR")
-                traceback.print_exc()
-                raise e
-    except Exception as e:
-        log_message(f"❌ Критическая ошибка в setup_driver: {e}", "ERROR")
-        traceback.print_exc()
-        raise
+    service = Service(executable_path=driver_path)
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    driver.maximize_window()
+    log_message("✓ Браузер успешно запущен", "INFO")
+    return driver
 
 def close_driver(driver):
     """Безопасное закрытие драйвера."""
@@ -254,6 +187,278 @@ def close_driver(driver):
             log_message("✓ Браузер закрыт", "INFO")
         except:
             pass
+
+# ============================================
+# ФУНКЦИИ АВТОРИЗАЦИИ
+# ============================================
+def login(driver, username, password):
+    """Авторизация на сайте."""
+    log_message("\n🔑 Выполнение авторизации...", "INFO")
+
+    try:
+        driver.get(LOGIN_URL)
+        time.sleep(3)
+
+        login_field = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "query"))
+        )
+        login_field.clear()
+        login_field.send_keys(username)
+
+        password_field = driver.find_element(By.ID, "password")
+        password_field.clear()
+        password_field.send_keys(password)
+
+        submit_button = driver.find_element(By.CSS_SELECTOR,
+            "button.button.button_responsive.active[type='submit']")
+        submit_button.click()
+
+        time.sleep(5)
+
+        if "sign_in" not in driver.current_url:
+            log_message("✓ Авторизация успешна", "INFO")
+            return True
+        else:
+            log_message("✗ Ошибка авторизации", "ERROR")
+            return False
+
+    except Exception as e:
+        log_message(f"✗ Ошибка при авторизации: {e}", "ERROR")
+        traceback.print_exc()
+        return False
+
+# ============================================
+# ФУНКЦИИ ПАРСИНГА
+# ============================================
+def extract_document_number(text):
+    """Извлекает только цифры из номера документа."""
+    numbers = re.findall(r'\d+', text)
+    return numbers[0] if numbers else None
+
+def parse_wagon_dates(driver, wagon_data):
+    """Парсинг дат для текущего вагона."""
+    try:
+        date_blocks = driver.find_elements(By.CSS_SELECTOR,
+            "div.d-inline-block.mr-4_5.pb-3")
+
+        for block in date_blocks:
+            try:
+                title = block.find_element(By.CSS_SELECTOR,
+                    "span.font-weight-medium").text.strip()
+                value = block.find_element(By.CSS_SELECTOR,
+                    "div.font-weight-normal.mt-1.pt-1").text.strip().replace('\n', ' ')
+
+                if title == "Подача":
+                    wagon_data['Подача'] = value
+                elif title == "Уборка":
+                    wagon_data['Уборка'] = value
+                elif "Возврат" in title:
+                    wagon_data['Возврат на выставочный путь'] = value
+
+            except Exception as e:
+                log_message(f"  Ошибка парсинга блока: {e}", "DEBUG")
+
+    except Exception as e:
+        log_message(f"  Ошибка при поиске дат: {e}", "DEBUG")
+        wagon_data['Подача'] = "Не найдено"
+        wagon_data['Уборка'] = "Не найдено"
+        wagon_data['Возврат на выставочный путь'] = "Не найдено"
+
+def find_document_number(driver):
+    """Поиск номера документа."""
+    try:
+        elements = driver.find_elements(By.XPATH, "//*[contains(text(), '№')]")
+        for element in elements:
+            text = element.text.strip()
+            if '№' in text and any(char.isdigit() for char in text):
+                extracted = extract_document_number(text)
+                if extracted:
+                    log_message(f"  ✓ Найден номер документа: {extracted}", "INFO")
+                    return extracted
+    except:
+        pass
+    return "Не найдено"
+
+def parse_all_wagons(driver, document_number):
+    """Парсинг данных по всем вагонам."""
+    wagons_data = []
+    global progress
+
+    try:
+        WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR,
+                "div.list-custom.list-custom_roster"))
+        )
+    except TimeoutException:
+        log_message("✗ Список вагонов не найден", "ERROR")
+        return wagons_data
+
+    wagon_buttons = driver.find_elements(By.CSS_SELECTOR,
+        "div.list-custom.list-custom_roster button.list-custom__item")
+    doc_id = driver.current_url.rstrip('/').split('/')[-1]
+
+    progress['total'] = len(wagon_buttons)
+    log_message(f"\n📋 Найдено вагонов: {len(wagon_buttons)}", "INFO")
+
+    for i, button in enumerate(wagon_buttons, 1):
+        progress['current'] = i
+        progress['message'] = f'Обработка вагона {i} из {len(wagon_buttons)}'
+
+        try:
+            wagon_number = button.find_element(By.CSS_SELECTOR,
+                "span.list-custom__name").text.strip()
+
+            driver.execute_script("arguments[0].scrollIntoView(true);", button)
+            time.sleep(1)
+            button.click()
+            time.sleep(2)
+
+            wagon_data = {}
+            parse_wagon_dates(driver, wagon_data)
+
+            wagon_data['Номер вагона'] = wagon_number
+            wagon_data['ID документа'] = doc_id
+            wagon_data['Номер документа'] = document_number
+
+            wagons_data.append(wagon_data)
+            log_message(f"  ✓ Вагон {i}: {wagon_number} обработан", "INFO")
+
+        except Exception as e:
+            log_message(f"  ✗ Ошибка при обработке вагона {i}: {e}", "ERROR")
+            continue
+
+    return wagons_data
+
+def download_pdf(driver, download_dir, doc_id):
+    """Скачивание печатной формы."""
+    try:
+        log_message("\n📥 Скачивание PDF...", "INFO")
+
+        selectors = [
+            "button.button_download",
+            "//button[contains(text(), 'Печатная форма')]",
+            "//button[contains(text(), 'печатная форма')]",
+            "button[class*='download']"
+        ]
+
+        download_button = None
+        for selector in selectors:
+            try:
+                if selector.startswith("//"):
+                    download_button = driver.find_element(By.XPATH, selector)
+                else:
+                    download_button = driver.find_element(By.CSS_SELECTOR, selector)
+                if download_button:
+                    break
+            except:
+                continue
+
+        if download_button:
+            files_before = set(os.listdir(download_dir))
+
+            driver.execute_script("arguments[0].scrollIntoView(true);", download_button)
+            time.sleep(1)
+            download_button.click()
+
+            timeout = 10
+            for _ in range(timeout):
+                time.sleep(1)
+                files_after = set(os.listdir(download_dir))
+                new_files = files_after - files_before
+                if new_files:
+                    pdf_files = [f for f in new_files if f.endswith('.pdf')]
+                    if pdf_files:
+                        old_path = os.path.join(download_dir, pdf_files[0])
+                        new_filename = f"{doc_id}.pdf"
+                        new_path = os.path.join(download_dir, new_filename)
+
+                        if os.path.exists(new_path):
+                            os.remove(new_path)
+                        os.rename(old_path, new_path)
+                        log_message(f"  ✓ PDF сохранен как: {new_filename}", "INFO")
+                        return new_filename
+            log_message("  ✗ PDF не скачался", "WARNING")
+        else:
+            log_message("  ✗ Кнопка 'Печатная форма' не найдена", "WARNING")
+
+    except Exception as e:
+        log_message(f"  ✗ Ошибка при скачивании PDF: {e}", "ERROR")
+    return None
+
+def process_document(driver, url, session_dir):
+    """Обработка одного документа."""
+    global progress
+    progress['message'] = f'Переход к документу: {url}'
+
+    if '/' in url:
+        doc_id = url.rstrip('/').split('/')[-1]
+    else:
+        doc_id = url
+        url = f"https://cargolk.rzd.ru/documents/archive/memos/{doc_id}"
+
+    log_message(f"\n📄 Обработка документа ID: {doc_id}", "INFO")
+
+    driver.get(url)
+    time.sleep(5)
+
+    document_number = find_document_number(driver)
+    wagons_data = parse_all_wagons(driver, document_number)
+    pdf_filename = download_pdf(driver, session_dir, doc_id)
+
+    return {
+        'url': url,
+        'doc_id': doc_id,
+        'document_number': document_number,
+        'wagons': wagons_data,
+        'pdf': pdf_filename
+    }
+
+def create_zip_with_results(session_dir, all_results):
+    """Создание ZIP архива с результатами."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    zip_filename = f"results_{timestamp}.zip"
+    zip_path = os.path.join(session_dir, zip_filename)
+
+    log_message(f"\n📦 Создание ZIP архива: {zip_filename}", "INFO")
+
+    all_wagons = []
+    for result in all_results:
+        for wagon in result['wagons']:
+            wagon['URL документа'] = result['url']
+            wagon['PDF файл'] = result['pdf'] if result['pdf'] else 'Не скачан'
+            all_wagons.append(wagon)
+
+    if all_wagons:
+        df = pd.DataFrame(all_wagons)
+
+        excel_path = os.path.join(session_dir, "all_data.xlsx")
+        df.to_excel(excel_path, index=False, engine='openpyxl')
+        log_message(f"  ✓ Excel файл: {len(all_wagons)} записей", "INFO")
+
+        csv_path = os.path.join(session_dir, "all_data.csv")
+        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        log_message(f"  ✓ CSV файл создан", "INFO")
+
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        if os.path.exists(excel_path):
+            zipf.write(excel_path, "all_data.xlsx")
+        if os.path.exists(csv_path):
+            zipf.write(csv_path, "all_data.csv")
+
+        pdf_count = 0
+        for result in all_results:
+            if result['pdf']:
+                pdf_path = os.path.join(session_dir, result['pdf'])
+                if os.path.exists(pdf_path):
+                    zipf.write(pdf_path, f"pdf/{result['pdf']}")
+                    pdf_count += 1
+
+        log_message(f"  ✓ Добавлено PDF: {pdf_count}", "INFO")
+
+    zip_size = os.path.getsize(zip_path) / (1024 * 1024)
+    log_message(f"  ✓ ZIP создан: {zip_filename} ({zip_size:.2f} MB)", "INFO")
+
+    return zip_path
 
 # ============================================
 # ТЕСТОВЫЕ ЭНДПОИНТЫ
@@ -291,29 +496,18 @@ def debug():
 # ============================================
 @app.errorhandler(500)
 def internal_error(error):
-    """Возвращаем JSON при внутренней ошибке."""
     log_message(f"500 error: {error}", "ERROR")
     return jsonify({'error': 'Внутренняя ошибка сервера', 'details': str(error)}), 500
 
 @app.errorhandler(404)
 def not_found(error):
-    """Возвращаем JSON при ошибке 404."""
     return jsonify({'error': 'Ресурс не найден'}), 404
 
 @app.errorhandler(Exception)
 def handle_exception(e):
-    """Обработка всех исключений."""
     log_message(f"❌ Необработанное исключение: {e}", "ERROR")
     traceback.print_exc()
     return jsonify({'error': 'Внутренняя ошибка сервера', 'details': str(e)}), 500
-
-# ============================================
-# ОСНОВНЫЕ ФУНКЦИИ ПАРСИНГА
-# ============================================
-# ... (все остальные функции из вашего app.py остаются без изменений) ...
-# Вставьте сюда все остальные функции: login, extract_document_number,
-# parse_wagon_dates, find_document_number, parse_all_wagons, download_pdf,
-# process_document, create_zip_with_results
 
 # ============================================
 # ВЕБ-ИНТЕРФЕЙС
@@ -339,7 +533,6 @@ def start_parsing():
         urls = [url.strip() for url in urls_text.split('\n') if url.strip()]
 
         if not urls:
-            log_message("✗ Нет URL для обработки", "WARNING")
             return jsonify({'error': 'Введите хотя бы один URL'}), 400
 
         log_message(f"✓ Обрабатывается URL: {len(urls)}", "INFO")
@@ -360,12 +553,9 @@ def start_parsing():
         all_results = []
 
         try:
-            log_message("\n🚀 Запуск браузера...", "INFO")
             driver = setup_driver(session_dir)
 
-            log_message("\n🔑 Выполнение авторизации...", "INFO")
             if not login(driver, USERNAME, PASSWORD):
-                log_message("✗ Ошибка авторизации", "ERROR")
                 return jsonify({'error': 'Ошибка авторизации'}), 500
 
             for i, url in enumerate(urls, 1):
@@ -379,19 +569,15 @@ def start_parsing():
                     log_message(f"  ✓ Документ обработан, найдено вагонов: {len(result['wagons'])}", "INFO")
                 except Exception as e:
                     log_message(f"  ✗ Ошибка при обработке документа {url}: {e}", "ERROR")
-                    traceback.print_exc()
                     continue
 
             if not all_results:
                 return jsonify({'error': 'Не удалось обработать ни одного документа'}), 500
 
-            log_message("\n📦 Создание ZIP архива...", "INFO")
             zip_path = create_zip_with_results(session_dir, all_results)
 
             progress['status'] = 'completed'
             progress['message'] = f'Готово! Обработано {len(all_results)} документов'
-
-            log_message(f"\n✅ Успешно! ZIP файл: {os.path.basename(zip_path)}", "INFO")
 
             return jsonify({
                 'success': True,
