@@ -578,6 +578,7 @@ def start_parsing():
 
             progress['status'] = 'completed'
             progress['message'] = f'Готово! Обработано {len(all_results)} документов'
+            progress['result_file'] = os.path.basename(zip_path)
 
             return jsonify({
                 'success': True,
