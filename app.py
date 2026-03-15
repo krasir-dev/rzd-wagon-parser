@@ -6,7 +6,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
+# from selenium.common.exceptions import TimeoutException, NoSuchElementException, StaleElementReferenceException
 import os
 import re
 import zipfile
@@ -15,8 +15,8 @@ from datetime import datetime
 from flask import Flask, render_template, request, jsonify, send_file
 from dotenv import load_dotenv
 import subprocess
-import shutil
-import stat
+# import shutil
+# import stat
 import sys
 import traceback
 
@@ -59,6 +59,7 @@ progress = {
     'message': ''
 }
 
+
 # ============================================
 # ЛОГИРОВАНИЕ
 # ============================================
@@ -67,6 +68,7 @@ def log_message(msg, level="INFO"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     print(f"[{timestamp}] {level}: {msg}")
     sys.stdout.flush()
+
 
 # ============================================
 # ПРОВЕРКА И НАСТРОЙКА CHROMIUM
@@ -119,7 +121,9 @@ def setup_chromium():
     log_message("="*60, "DEBUG")
     return chromium_binary, chromedriver_path
 
+
 CHROMIUM_BINARY, CHROMEDRIVER_PATH = setup_chromium()
+
 
 # ============================================
 # ФУНКЦИИ ДЛЯ РАБОТЫ С ДРАЙВЕРОМ
@@ -179,6 +183,7 @@ def setup_driver(download_dir):
     log_message("✓ Браузер успешно запущен", "INFO")
     return driver
 
+
 def close_driver(driver):
     """Безопасное закрытие драйвера."""
     if driver:
@@ -187,6 +192,7 @@ def close_driver(driver):
             log_message("✓ Браузер закрыт", "INFO")
         except:
             pass
+
 
 # ============================================
 # ФУНКЦИИ АВТОРИЗАЦИИ
@@ -227,6 +233,7 @@ def login(driver, username, password):
         traceback.print_exc()
         return False
 
+
 # ============================================
 # ФУНКЦИИ ПАРСИНГА
 # ============================================
@@ -234,6 +241,7 @@ def extract_document_number(text):
     """Извлекает только цифры из номера документа."""
     numbers = re.findall(r'\d+', text)
     return numbers[0] if numbers else None
+
 
 def parse_wagon_dates(driver, wagon_data):
     """Парсинг дат для текущего вагона."""
@@ -264,6 +272,7 @@ def parse_wagon_dates(driver, wagon_data):
         wagon_data['Уборка'] = "Не найдено"
         wagon_data['Возврат на выставочный путь'] = "Не найдено"
 
+
 def find_document_number(driver):
     """Поиск номера документа."""
     try:
@@ -278,6 +287,7 @@ def find_document_number(driver):
     except:
         pass
     return "Не найдено"
+
 
 def parse_all_wagons(driver, document_number):
     """Парсинг данных по всем вагонам."""
@@ -328,6 +338,7 @@ def parse_all_wagons(driver, document_number):
             continue
 
     return wagons_data
+
 
 def download_pdf(driver, download_dir, doc_id):
     """Скачивание печатной формы."""
@@ -385,6 +396,7 @@ def download_pdf(driver, download_dir, doc_id):
         log_message(f"  ✗ Ошибка при скачивании PDF: {e}", "ERROR")
     return None
 
+
 def process_document(driver, url, session_dir):
     """Обработка одного документа."""
     global progress
@@ -412,6 +424,7 @@ def process_document(driver, url, session_dir):
         'wagons': wagons_data,
         'pdf': pdf_filename
     }
+
 
 def create_zip_with_results(session_dir, all_results):
     """Создание ZIP архива с результатами."""
@@ -460,6 +473,7 @@ def create_zip_with_results(session_dir, all_results):
 
     return zip_path
 
+
 # ============================================
 # ТЕСТОВЫЕ ЭНДПОИНТЫ
 # ============================================
@@ -474,6 +488,7 @@ def test():
         'python_version': sys.version,
         'time': datetime.now().isoformat()
     })
+
 
 @app.route('/debug')
 def debug():
@@ -491,6 +506,7 @@ def debug():
     }
     return jsonify(info)
 
+
 # ============================================
 # ОБРАБОТЧИКИ ОШИБОК
 # ============================================
@@ -499,15 +515,18 @@ def internal_error(error):
     log_message(f"500 error: {error}", "ERROR")
     return jsonify({'error': 'Внутренняя ошибка сервера', 'details': str(error)}), 500
 
+
 @app.errorhandler(404)
 def not_found(error):
     return jsonify({'error': 'Ресурс не найден'}), 404
+
 
 @app.errorhandler(Exception)
 def handle_exception(e):
     log_message(f"❌ Необработанное исключение: {e}", "ERROR")
     traceback.print_exc()
     return jsonify({'error': 'Внутренняя ошибка сервера', 'details': str(e)}), 500
+
 
 # ============================================
 # ВЕБ-ИНТЕРФЕЙС
@@ -516,6 +535,7 @@ def handle_exception(e):
 def index():
     """Главная страница."""
     return render_template('index.html')
+
 
 @app.route('/start_parsing', methods=['POST'])
 def start_parsing():
@@ -600,10 +620,18 @@ def start_parsing():
         traceback.print_exc()
         return jsonify({'error': str(e)}), 500
 
+
 @app.route('/progress')
 def get_progress():
+    #"""Получение прогресса."""
+    # return jsonify(progress)
     """Получение прогресса."""
-    return jsonify(progress)
+    response = jsonify(progress)
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Cache-Control', 'no-cache, no-store, must-revalidate')
+    response.headers.add('Pragma', 'no-cache')
+    response.headers.add('Expires', '0')
+    return response
 
 @app.route('/download/<filename>')
 def download_file(filename):
@@ -616,6 +644,7 @@ def download_file(filename):
 
     return jsonify({'error': 'Файл не найден'}), 404
 
+
 # ============================================
 # ЗАПУСК ПРИЛОЖЕНИЯ
 # ============================================
@@ -627,4 +656,4 @@ if __name__ == '__main__':
     log_message(f"👤 Пользователь: {USERNAME}", "INFO")
     log_message("="*60 + "\n", "INFO")
 
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=True, host='0.0.0.0', port=5028)
