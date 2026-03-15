@@ -16,29 +16,38 @@ from flask import Flask, render_template, request, jsonify, send_file
 from webdriver_manager.chrome import ChromeDriverManager
 from dotenv import load_dotenv
 
-app = Flask(__name__)
 
 # Загружаем переменные окружения из .env файла
 load_dotenv()
 
+app = Flask(__name__)
 
-# --- НАСТРОЙКИ ---
+
+# --- НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ ОКРУЖЕНИЯ ---
 LOGIN_URL = "https://cargolk.rzd.ru/sign_in"
-# Берем логин и пароль из переменных окружения
 USERNAME = os.getenv('RZD_USERNAME')
 PASSWORD = os.getenv('RZD_PASSWORD')
 
-# Проверяем, что логин и пароль загружены
+
+# Проверяем наличие учетных данных
 if not USERNAME or not PASSWORD:
-    raise ValueError("Не заданы LOGIN и PASSWORD в файле .env или переменных окружения")
+    raise ValueError(
+        "❌ Не заданы учетные данные!\n"
+        "Создайте файл .env в папке проекта с содержимым:\n"
+        "RZD_USERNAME=ваш_логин\n"
+        "RZD_PASSWORD=ваш_пароль"
+    )
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
 TEMPLATES_DIR = os.path.join(BASE_DIR, "templates")
 
+
 # Создаем папки, если их нет
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
+
 
 # Глобальная переменная для хранения прогресса
 progress = {
@@ -48,7 +57,8 @@ progress = {
     'message': ''
 }
 
-# ----------------- ФУНКЦИИ ПАРСИНГА (из вашего кода) -----------------
+
+# ----------------- ФУНКЦИИ ПАРСИНГА -----------------
 
 def setup_driver(download_dir):
     """Настройка драйвера Chrome."""
@@ -73,6 +83,7 @@ def setup_driver(download_dir):
     driver.maximize_window()
     return driver
 
+
 def login(driver, username, password):
     """Авторизация на сайте."""
     driver.get(LOGIN_URL)
@@ -95,6 +106,7 @@ def login(driver, username, password):
         print(f"Ошибка авторизации: {e}")
         return False
 
+
 def extract_document_number(text):
     """Извлекает только цифры из номера документа."""
     numbers = re.findall(r'\d+', text)
@@ -102,8 +114,9 @@ def extract_document_number(text):
         return numbers[0]
     return None
 
+
 def parse_all_wagons(driver, document_number):
-    """Парсинг данных по всем вагонам."""
+    """Парсинг данных по всем вагонам с переключением между ними."""
     wagons_data = []
     global progress
 
@@ -146,6 +159,7 @@ def parse_all_wagons(driver, document_number):
 
     return wagons_data
 
+
 def parse_wagon_dates(driver, wagon_data):
     """Парсинг дат для текущего вагона."""
     try:
@@ -172,22 +186,27 @@ def parse_wagon_dates(driver, wagon_data):
         wagon_data['Уборка'] = "Не найдено"
         wagon_data['Возврат на выставочный путь'] = "Не найдено"
 
+
 def find_document_number(driver):
-    """Поиск номера документа."""
+    """Парсинг номера документа."""
     try:
+        # Ищем любой элемент, содержащий текст с № и цифрами
         elements = driver.find_elements(By.XPATH, "//*[contains(text(), '№')]")
         for element in elements:
             text = element.text.strip()
             if '№' in text and any(char.isdigit() for char in text):
                 extracted = extract_document_number(text)
                 if extracted:
-                    return extracted
+                    doc_number = extracted
+                    print(f"✓ Найден номер документа: {doc_number} (из текста: '{text}')")
+                    return doc_number
     except:
         pass
     return "Не найдено"
 
+
 def download_pdf(driver, download_dir, doc_id):
-    """Скачивание печатной формы."""
+    """Скачивание печатной формы и переименование в ID документа."""
     try:
         selectors = [
             "button.button_download",
@@ -209,45 +228,73 @@ def download_pdf(driver, download_dir, doc_id):
                 continue
 
         if download_button:
+            # Запоминаем файлы до клика
+            files_before = set(os.listdir(download_dir))
+
             driver.execute_script("arguments[0].scrollIntoView(true);", download_button)
             time.sleep(1)
             download_button.click()
-            time.sleep(5)
+            print(f"  ✓ Клик по кнопке 'Печатная форма' выполнен")
 
-            files_before = set(os.listdir(download_dir))
-            time.sleep(3)
-            files_after = set(os.listdir(download_dir))
-            new_files = files_after - files_before
-            pdf_files = [f for f in new_files if f.endswith('.pdf')]
+            # Ждем скачивания (до 10 секунд)
+            timeout = 10
+            new_files = None
+            for _ in range(timeout):
+                time.sleep(1)
+                files_after = set(os.listdir(download_dir))
+                new_files = files_after - files_before
+                if new_files:
+                    break
 
-            if pdf_files:
-                old_path = os.path.join(download_dir, pdf_files[0])
-                new_filename = f"document_{doc_id}.pdf"
-                new_path = os.path.join(download_dir, new_filename)
-                if os.path.exists(new_path):
-                    os.remove(new_path)
-                os.rename(old_path, new_path)
-                return new_filename
+            if new_files:
+                # Находим скачанный PDF
+                pdf_files = [f for f in new_files if f.endswith('.pdf')]
+                if pdf_files:
+                    old_path = os.path.join(download_dir, pdf_files[0])
+                    # Переименовываем в ID документа
+                    new_filename = f"{doc_id}.pdf"
+                    new_path = os.path.join(download_dir, new_filename)
+
+                    # Если файл с таким именем уже есть, удаляем
+                    if os.path.exists(new_path):
+                        os.remove(new_path)
+
+                    os.rename(old_path, new_path)
+                    print(f"  ✓ PDF переименован в: {new_filename}")
+                    return new_filename
+            else:
+                print("  ✗ PDF не скачался за 10 секунд")
     except Exception as e:
-        print(f"Ошибка при скачивании PDF: {e}")
+        print(f"  ✗ Ошибка при скачивании PDF: {e}")
     return None
+
 
 def process_document(driver, url, session_dir):
     """Обработка одного документа."""
     global progress
     progress['message'] = f'Переход к документу: {url}'
 
+    # Извлекаем ID из URL, если передан полный URL
+    if '/' in url:
+        doc_id = url.rstrip('/').split('/')[-1]
+    else:
+        doc_id = url
+        url = f"https://cargolk.rzd.ru/documents/archive/memos/{doc_id}"
+
+    print(f"\n📄 Обработка документа ID: {doc_id}")
+
     driver.get(url)
     time.sleep(5)
 
     # Находим номер документа
     document_number = find_document_number(driver)
+    print(f"  ✓ Номер документа: {document_number}")
 
     # Парсим вагоны
     wagons_data = parse_all_wagons(driver, document_number)
+    print(f"  ✓ Найдено вагонов: {len(wagons_data)}")
 
-    # Скачиваем PDF
-    doc_id = driver.current_url.rstrip('/').split('/')[-1]
+    # Скачиваем PDF (переименуется в ID документа)
     pdf_filename = download_pdf(driver, session_dir, doc_id)
 
     return {
@@ -258,13 +305,16 @@ def process_document(driver, url, session_dir):
         'pdf': pdf_filename
     }
 
+
 def create_zip_with_results(session_dir, all_results):
-    """Создание ZIP архива со всеми результатами."""
+    """Создание ZIP архива со всеми результатами (Excel, CSV и все PDF)."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     zip_filename = f"results_{timestamp}.zip"
     zip_path = os.path.join(session_dir, zip_filename)
 
-    # Создаем общий Excel файл
+    print(f"\n📦 Создание ZIP архива: {zip_filename}")
+
+    # Создаем общий Excel файл со всеми данными
     all_wagons = []
     for result in all_results:
         for wagon in result['wagons']:
@@ -274,23 +324,70 @@ def create_zip_with_results(session_dir, all_results):
 
     if all_wagons:
         df = pd.DataFrame(all_wagons)
+
+        # Переупорядочиваем колонки для удобства
+        columns_order = ['Номер вагона', 'Подача', 'Уборка', 'Возврат на выставочный путь',
+                        'Номер документа', 'ID документа', 'URL документа', 'PDF файл']
+        existing_columns = [col for col in columns_order if col in df.columns]
+        df = df[existing_columns]
+
+        # Сохраняем Excel
         excel_path = os.path.join(session_dir, "all_data.xlsx")
-        df.to_excel(excel_path, index=False)
+        df.to_excel(excel_path, index=False, engine='openpyxl')
+        print(f"  ✓ Excel файл создан: all_data.xlsx ({len(all_wagons)} записей)")
+
+        # Сохраняем CSV (как дополнительный формат)
+        csv_path = os.path.join(session_dir, "all_data.csv")
+        df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        print(f"  ✓ CSV файл создан: all_data.csv")
 
     # Создаем ZIP архив
-    with zipfile.ZipFile(zip_path, 'w') as zipf:
+    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
         # Добавляем Excel файл
         if os.path.exists(excel_path):
             zipf.write(excel_path, "all_data.xlsx")
+            print(f"  ✓ Добавлен в ZIP: all_data.xlsx")
 
-        # Добавляем все PDF файлы
+        # Добавляем CSV файл
+        if os.path.exists(csv_path):
+            zipf.write(csv_path, "all_data.csv")
+            print(f"  ✓ Добавлен в ZIP: all_data.csv")
+
+        # Добавляем все PDF файлы (уже переименованные в ID документа)
+        pdf_count = 0
         for result in all_results:
             if result['pdf']:
                 pdf_path = os.path.join(session_dir, result['pdf'])
                 if os.path.exists(pdf_path):
-                    zipf.write(pdf_path, f"pdf/{result['pdf']}")
+                    # Сохраняем PDF в папку pdf внутри архива
+                    arcname = f"pdf/{result['pdf']}"
+                    zipf.write(pdf_path, arcname)
+                    pdf_count += 1
+                    print(f"  ✓ Добавлен в ZIP: pdf/{result['pdf']}")
+
+        print(f"  ✓ Всего добавлено PDF: {pdf_count}")
+
+    # Проверяем размер архива
+    zip_size = os.path.getsize(zip_path) / (1024 * 1024)  # в MB
+    print(f"  ✓ ZIP архив создан: {zip_filename} ({zip_size:.2f} MB)")
 
     return zip_path
+
+
+def cleanup_old_files(session_dir, keep_hours=24):
+    """Очистка старых файлов (оставляем только за последние 24 часа)."""
+    try:
+        now = time.time()
+        for filename in os.listdir(session_dir):
+            filepath = os.path.join(session_dir, filename)
+            if os.path.isfile(filepath):
+                file_age = now - os.path.getmtime(filepath)
+                if file_age > keep_hours * 3600:  # Преобразуем часы в секунды
+                    os.remove(filepath)
+                    print(f"  🧹 Удален старый файл: {filename}")
+    except Exception as e:
+        print(f"Ошибка при очистке: {e}")
+
 
 # ----------------- ВЕБ-ИНТЕРФЕЙС -----------------
 
@@ -298,6 +395,7 @@ def create_zip_with_results(session_dir, all_results):
 def index():
     """Главная страница."""
     return render_template('index.html')
+
 
 @app.route('/start_parsing', methods=['POST'])
 def start_parsing():
@@ -324,8 +422,7 @@ def start_parsing():
         'message': 'Запуск парсинга...'
     }
 
-    # Запускаем обработку в фоне (в реальном приложении лучше использовать Celery)
-    # Для простоты здесь синхронная обработка
+    # Запускаем обработку
     driver = None
     all_results = []
 
@@ -344,6 +441,9 @@ def start_parsing():
 
         # Создаем ZIP архив
         zip_path = create_zip_with_results(session_dir, all_results)
+
+        # Очищаем старые файлы
+        cleanup_old_files(DOWNLOAD_DIR)
 
         progress['status'] = 'completed'
         progress['message'] = f'Готово! Обработано {len(urls)} документов'
@@ -364,11 +464,13 @@ def start_parsing():
         if driver:
             driver.quit()
 
+
 @app.route('/progress')
 def get_progress():
     """Получение текущего прогресса."""
     global progress
     return jsonify(progress)
+
 
 @app.route('/download/<filename>')
 def download_file(filename):
@@ -381,6 +483,7 @@ def download_file(filename):
                 return send_file(file_path, as_attachment=True)
 
     return jsonify({'error': 'Файл не найден'}), 404
+
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=5028)
